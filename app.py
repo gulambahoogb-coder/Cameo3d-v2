@@ -16,7 +16,7 @@ app = Flask(__name__)
 # ---- FILL THESE IN ----
 # The API key is read from Render's "Environment Variables" setting,
 # NOT written here directly - this keeps it out of GitHub entirely.
-RUNPOD_API_KEY = os.environ.get("rpa_5PWJZZJE7RMK679DCS5L6P8D1INRHP8Z25JU8E10tp9zfp")
+RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
 ENDPOINT_ID = "egysfj217v2p31"
 # -------------------------------------------------------
 
