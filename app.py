@@ -19,6 +19,27 @@ from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
 
+# ---------------------------------------------------------------
+# PERMISSION FOR YOUR ODOO WEBSITE (CORS)
+# Lets https://cameo3d.odoo.com call this server from the browser.
+# ---------------------------------------------------------------
+ALLOWED_ORIGINS = [
+    "https://cameo3d.odoo.com",
+    "https://www.cameo3d.odoo.com",
+]
+
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
 ENDPOINT_ID = "egysfj217v2p31"
 
