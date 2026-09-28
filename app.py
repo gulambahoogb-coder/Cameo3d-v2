@@ -840,7 +840,7 @@ PAGE = r"""
             <span>100 credits</span>
         </div>
 
-        <button class="upgrade">Upgrade</button>
+        <a class="upgrade" href="https://cameo3d.odoo.com/pricing">Upgrade</a>
         <div class="avatar">G</div>
     </header>
 
