@@ -42,19 +42,19 @@ PAGE = r"""
 
     <style>
         :root {
-            --bg: #11120f;
-            --panel: #171815;
-            --panel-2: #1d1e1a;
-            --panel-3: #22231f;
-            --line: #30312c;
+            --bg: #0b0709;
+            --panel: #140a0e;
+            --panel-2: #1a0d12;
+            --panel-3: #211017;
+            --line: #3a1824;
             --text: #f5f5ef;
             --muted: #989a91;
             --muted-2: #6f7169;
-            --lime: #c8ff3d;
-            --lime-2: #aef52c;
-            --pink: #ff86bd;
-            --purple: #b89cff;
-            --danger: #ff6b7d;
+            --lime: #a91f4f;
+            --lime-2: #86163e;
+            --pink: #d94f78;
+            --purple: #b85b78;
+            --danger: #ff718e;
             --shadow: 0 25px 80px rgba(0,0,0,.35);
         }
 
@@ -81,7 +81,7 @@ PAGE = r"""
             grid-template-columns: 76px 360px minmax(0, 1fr) 320px;
             grid-template-rows: 66px minmax(0, 1fr);
             background:
-                radial-gradient(circle at 50% 35%, rgba(111,255,60,.035), transparent 28%),
+                radial-gradient(circle at 50% 35%, rgba(169,31,79,.055), transparent 28%),
                 var(--bg);
         }
 
@@ -113,9 +113,9 @@ PAGE = r"""
             border-radius: 10px;
             display: grid;
             place-items: center;
-            color: #11120f;
-            background: linear-gradient(135deg, var(--lime), #efff9e);
-            box-shadow: 0 0 25px rgba(200,255,61,.16);
+            color: #0b0709;
+            background: linear-gradient(135deg, var(--lime), #d96a8d);
+            box-shadow: 0 0 25px rgba(169,31,79,.16);
             font-weight: 900;
         }
 
@@ -135,7 +135,7 @@ PAGE = r"""
             padding: 0 13px;
             border: 1px solid var(--line);
             border-radius: 10px;
-            background: #181916;
+            background: #160b10;
             color: var(--text);
         }
 
@@ -184,7 +184,7 @@ PAGE = r"""
             padding: 10px 16px;
             font-weight: 800;
             color: #171815;
-            background: linear-gradient(90deg, var(--lime), #c8ff6d);
+            background: linear-gradient(90deg, var(--lime), #c13b68);
         }
 
         .avatar {
@@ -194,7 +194,7 @@ PAGE = r"""
             display: grid;
             place-items: center;
             background: #34352e;
-            border: 1px solid #45463e;
+            border: 1px solid #512433;
             font-weight: 800;
         }
 
@@ -203,7 +203,7 @@ PAGE = r"""
             grid-row: 2;
             border-right: 1px solid var(--line);
             padding: 14px 9px;
-            background: #121310;
+            background: #10080b;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -233,9 +233,9 @@ PAGE = r"""
         }
 
         .nav-item.active {
-            background: #1c1e18;
+            background: #211017;
             color: var(--lime);
-            border-color: #30332a;
+            border-color: #4b1f30;
         }
 
         .nav-spacer { flex: 1; }
@@ -244,7 +244,7 @@ PAGE = r"""
         .left-panel {
             grid-row: 2;
             border-right: 1px solid var(--line);
-            background: #151613;
+            background: #130a0e;
             overflow-y: auto;
             padding: 20px 18px;
         }
@@ -254,7 +254,7 @@ PAGE = r"""
             grid-template-columns: repeat(3, 1fr);
             gap: 5px;
             padding: 4px;
-            background: #10110f;
+            background: #0d070a;
             border: 1px solid var(--line);
             border-radius: 13px;
         }
@@ -273,7 +273,7 @@ PAGE = r"""
 
         .mode strong { font-size: 18px; color: #aaa; }
         .mode.active {
-            background: #25271f;
+            background: #261019;
             color: var(--text);
         }
         .mode.active strong { color: var(--lime); }
@@ -298,9 +298,9 @@ PAGE = r"""
 
         .model-choice {
             padding: 14px;
-            border: 1px solid #35372e;
+            border: 1px solid #4a2030;
             border-radius: 12px;
-            background: linear-gradient(145deg, #20231b, #181a16);
+            background: linear-gradient(145deg, #241018, #170b10);
         }
 
         .model-choice .name {
@@ -317,11 +317,11 @@ PAGE = r"""
 
         .upload-box {
             min-height: 250px;
-            border: 1px dashed #4b4e43;
+            border: 1px dashed #5c293b;
             border-radius: 15px;
             background:
-                radial-gradient(circle at 50% 30%, rgba(200,255,61,.035), transparent 38%),
-                #191a17;
+                radial-gradient(circle at 50% 30%, rgba(169,31,79,.045), transparent 38%),
+                #180c11;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -334,7 +334,7 @@ PAGE = r"""
         .upload-box.dragging,
         .upload-box:hover {
             border-color: var(--lime);
-            background: #1d2018;
+            background: #211018;
         }
 
         .upload-icon {
@@ -343,7 +343,7 @@ PAGE = r"""
             border-radius: 15px;
             display: grid;
             place-items: center;
-            background: #252820;
+            background: #27111a;
             color: var(--lime);
             margin-bottom: 12px;
         }
@@ -366,7 +366,7 @@ PAGE = r"""
 
         .choose {
             margin-top: 15px;
-            border: 1px solid #4a4d42;
+            border: 1px solid #5a2939;
             border-radius: 8px;
             padding: 8px 13px;
             color: #eee;
@@ -409,7 +409,7 @@ PAGE = r"""
             height: 24px;
             padding: 3px;
             border-radius: 30px;
-            background: #34362e;
+            background: #3a2029;
             border: 0;
         }
 
@@ -428,7 +428,7 @@ PAGE = r"""
 
         .switch.on span {
             transform: translateX(18px);
-            background: #151613;
+            background: #130a0e;
         }
 
         .generate {
@@ -439,8 +439,8 @@ PAGE = r"""
             border-radius: 11px;
             color: #141510;
             font-weight: 900;
-            background: linear-gradient(100deg, #baff32 0%, #d4ff72 50%, #ff91c3 100%);
-            box-shadow: 0 8px 30px rgba(200,255,61,.08);
+            background: linear-gradient(100deg, #86163e 0%, #a91f4f 50%, #d94f78 100%);
+            box-shadow: 0 8px 30px rgba(169,31,79,.10);
         }
 
         .generate:disabled {
@@ -498,7 +498,7 @@ PAGE = r"""
 
         .canvas-pill button.active {
             color: var(--text);
-            background: #2b2d27;
+            background: #351621;
         }
 
         .canvas-tools {
@@ -542,7 +542,7 @@ PAGE = r"""
         .hero-symbol svg {
             width: 72px;
             height: 72px;
-            filter: drop-shadow(0 0 22px rgba(200,255,61,.08));
+            filter: drop-shadow(0 0 22px rgba(169,31,79,.10));
         }
 
         .empty-canvas h1 {
@@ -565,7 +565,7 @@ PAGE = r"""
             border-radius: 10px;
             font-weight: 900;
             color: #141510;
-            background: linear-gradient(100deg, var(--lime), #d8ff77, var(--pink));
+            background: linear-gradient(100deg, var(--lime-2), var(--lime), var(--pink));
         }
 
         #viewerWrap {
@@ -579,7 +579,7 @@ PAGE = r"""
             height: 100%;
             --poster-color: transparent;
             background:
-                radial-gradient(circle at 50% 45%, #2b2d29 0%, #1a1b19 55%, #151613 100%);
+                radial-gradient(circle at 50% 45%, #321722 0%, #1a1b19 55%, #130a0e 100%);
         }
 
         .viewer-overlay {
@@ -622,7 +622,7 @@ PAGE = r"""
         .right-panel {
             grid-row: 2;
             border-left: 1px solid var(--line);
-            background: #151613;
+            background: #130a0e;
             padding: 20px 14px;
             overflow-y: auto;
         }
@@ -665,7 +665,7 @@ PAGE = r"""
         }
 
         .asset-tabs span.active {
-            background: #272920;
+            background: #351520;
             color: var(--lime);
         }
 
@@ -677,9 +677,9 @@ PAGE = r"""
 
         .asset {
             min-height: 126px;
-            border: 1px solid #292b25;
+            border: 1px solid #3a1a25;
             border-radius: 11px;
-            background: linear-gradient(145deg, #22231f, #191a17);
+            background: linear-gradient(145deg, #22231f, #180c11);
             overflow: hidden;
             position: relative;
             display: flex;
