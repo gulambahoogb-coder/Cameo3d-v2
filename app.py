@@ -13,6 +13,7 @@ with lime/lime-to-pink accent colors inspired by modern 3D creation tools.
 """
 
 import os
+import time
 import base64
 import requests
 from flask import Flask, request, jsonify, render_template_string
@@ -38,6 +39,32 @@ def add_cors_headers(response):
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
+
+
+# ---------------------------------------------------------------
+# PROTECTION AGAINST MISUSE (protects your RunPod credits)
+# ---------------------------------------------------------------
+MAX_JOBS_PER_HOUR = 10                       # per visitor (IP address). Raise it if you test a lot.
+app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024   # reject uploads bigger than ~12 MB
+
+_hits = {}
+
+
+def origin_ok():
+    """Only requests coming from your Odoo website are accepted."""
+    return request.headers.get("Origin", "") in ALLOWED_ORIGINS
+
+
+def too_many_jobs():
+    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "?").split(",")[0].strip()
+    now = time.time()
+    hits = [t for t in _hits.get(ip, []) if now - t < 3600]
+    if len(hits) >= MAX_JOBS_PER_HOUR:
+        _hits[ip] = hits
+        return True
+    hits.append(now)
+    _hits[ip] = hits
+    return False
 
 
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
@@ -1347,11 +1374,17 @@ PAGE = r"""
 
 @app.route("/")
 def index():
-    return render_template_string(PAGE)
+    # The standalone tool page is switched off. Visitors use the Odoo website instead.
+    # (This small reply also lets the Odoo page wake the free server up.)
+    return "Cameo3D API is running.", 200
 
 
 @app.route("/submit", methods=["POST"])
 def submit():
+    if not origin_ok():
+        return jsonify({"error": "Forbidden."}), 403
+    if too_many_jobs():
+        return jsonify({"error": "Too many requests. Please try again later."}), 429
     if not RUNPOD_API_KEY:
         return jsonify({"error": "RUNPOD_API_KEY is not configured on Render."}), 500
 
@@ -1388,6 +1421,8 @@ def submit():
 
 @app.route("/status/<job_id>")
 def status(job_id):
+    if not origin_ok():
+        return jsonify({"error": "Forbidden."}), 403
     if not RUNPOD_API_KEY:
         return jsonify({"error": "RUNPOD_API_KEY is not configured on Render."}), 500
 
