@@ -74,7 +74,7 @@ def too_many_jobs():
 # ---------------------------------------------------------------
 TENCENT_API_KEY = os.environ.get("TENCENT_API_KEY")
 TENCENT_BASE_URL = "https://tokenhub.tencentcloudmaas.com"
-TENCENT_MODEL = "hy-3d-3.1"
+TENCENT_MODEL = "tripo-3d-3.1"
 
 TENCENT_HEADERS = {
     "Authorization": f"Bearer {TENCENT_API_KEY}",
