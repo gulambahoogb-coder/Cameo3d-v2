@@ -4,8 +4,8 @@ Deploy this file as app.py on Render.
 
 Backend:
 - Accepts an image in the browser
-- Sends it to the RunPod Serverless endpoint
-- Polls RunPod until the GLB is ready
+- Sends it to the Tencent TokenHub HY-3D-3.1 API
+- Polls Tencent TokenHub until the GLB is ready
 - Displays the GLB in a 3D viewer
 
 The visual design is intentionally dark, premium, creator-focused,
@@ -42,7 +42,7 @@ def add_cors_headers(response):
 
 
 # ---------------------------------------------------------------
-# PROTECTION AGAINST MISUSE (protects your RunPod credits)
+# PROTECTION AGAINST MISUSE (protects your Tencent API quota)
 # ---------------------------------------------------------------
 MAX_JOBS_PER_HOUR = 10                       # per visitor (IP address). Raise it if you test a lot.
 app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024   # reject uploads bigger than ~12 MB
@@ -67,12 +67,17 @@ def too_many_jobs():
     return False
 
 
-RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY")
-ENDPOINT_ID = "egysfj217v2p31"
+# ---------------------------------------------------------------
+# TENCENT TOKENHUB — HY-3D-3.1
+# Put TENCENT_API_KEY in Render Environment Variables.
+# Keep this key on the server; never put it in Odoo/frontend code.
+# ---------------------------------------------------------------
+TENCENT_API_KEY = os.environ.get("TENCENT_API_KEY")
+TENCENT_BASE_URL = "https://tokenhub-intl.tencentmaas.com"
+TENCENT_MODEL = "hy-3d-3.1"
 
-BASE_URL = f"https://api.runpod.ai/v2/{ENDPOINT_ID}"
-HEADERS = {
-    "Authorization": f"Bearer {RUNPOD_API_KEY}",
+TENCENT_HEADERS = {
+    "Authorization": f"Bearer {TENCENT_API_KEY}",
     "Content-Type": "application/json",
 }
 
@@ -1385,8 +1390,8 @@ def submit():
         return jsonify({"error": "Forbidden."}), 403
     if too_many_jobs():
         return jsonify({"error": "Too many requests. Please try again later."}), 429
-    if not RUNPOD_API_KEY:
-        return jsonify({"error": "RUNPOD_API_KEY is not configured on Render."}), 500
+    if not TENCENT_API_KEY:
+        return jsonify({"error": "TENCENT_API_KEY is not configured on Render."}), 500
 
     data = request.get_json(silent=True) or {}
     image_b64 = data.get("image_base64")
@@ -1394,76 +1399,138 @@ def submit():
     if not image_b64:
         return jsonify({"error": "No image was provided."}), 400
 
+    # Remove a possible data-URL prefix if a client sends one.
+    if "," in image_b64 and image_b64.lstrip().lower().startswith("data:"):
+        image_b64 = image_b64.split(",", 1)[1]
+
+    # Tencent HY-3D-3.1 accepts image input <= 6 MB.
+    try:
+        raw_size = len(base64.b64decode(image_b64, validate=True))
+    except Exception:
+        return jsonify({"error": "Invalid base64 image data."}), 400
+
+    if raw_size > 6 * 1024 * 1024:
+        return jsonify({"error": "Image is larger than Tencent's 6 MB limit. Please choose a smaller image."}), 400
+
+    payload = {
+        "model": TENCENT_MODEL,
+        "image_base64": image_b64,
+        "enable_pbr": True,
+    }
+
+    # Map the existing Cameo/Odoo polycount selector to Tencent face_count.
+    # Tencent allows 3,000–1,500,000 faces. If no valid value is supplied,
+    # let Tencent use its default.
+    try:
+        requested_faces = int(data.get("polycount") or 0)
+        if 3000 <= requested_faces <= 1500000:
+            payload["face_count"] = requested_faces
+    except (TypeError, ValueError):
+        pass
+
     try:
         response = requests.post(
-            f"{BASE_URL}/run",
-            headers=HEADERS,
-            json={"input": {"image_base64": image_b64, "prompt": None}},
+            f"{TENCENT_BASE_URL}/v1/api/3d/submit",
+            headers=TENCENT_HEADERS,
+            json=payload,
             timeout=60,
         )
 
         if not response.ok:
             return jsonify({
-                "error": f"RunPod returned HTTP {response.status_code}: {response.text[:1000]}"
+                "error": f"Tencent returned HTTP {response.status_code}: {response.text[:1500]}"
             }), response.status_code
 
         result = response.json()
         job_id = result.get("id")
 
         if not job_id:
-            return jsonify({"error": "RunPod did not return a job ID.", "raw": result}), 502
+            return jsonify({
+                "error": "Tencent did not return a job ID.",
+                "raw": result
+            }), 502
 
         return jsonify({"job_id": job_id})
 
     except requests.RequestException as exc:
-        return jsonify({"error": f"Could not contact RunPod: {exc}"}), 502
+        return jsonify({"error": f"Could not contact Tencent TokenHub: {exc}"}), 502
 
 
 @app.route("/status/<job_id>")
 def status(job_id):
     if not origin_ok():
         return jsonify({"error": "Forbidden."}), 403
-    if not RUNPOD_API_KEY:
-        return jsonify({"error": "RUNPOD_API_KEY is not configured on Render."}), 500
+    if not TENCENT_API_KEY:
+        return jsonify({"error": "TENCENT_API_KEY is not configured on Render."}), 500
 
     try:
-        response = requests.get(
-            f"{BASE_URL}/status/{job_id}",
-            headers=HEADERS,
+        response = requests.post(
+            f"{TENCENT_BASE_URL}/v1/api/3d/query",
+            headers=TENCENT_HEADERS,
+            json={
+                "model": TENCENT_MODEL,
+                "id": job_id,
+            },
             timeout=30,
         )
 
         if not response.ok:
             return jsonify({
-                "error": f"RunPod returned HTTP {response.status_code}: {response.text[:1000]}"
+                "error": f"Tencent returned HTTP {response.status_code}: {response.text[:1500]}"
             }), response.status_code
 
         data = response.json()
-        job_status = data.get("status", "UNKNOWN")
+        job_status = str(data.get("status", "UNKNOWN")).lower()
 
-        result = {"status": job_status}
+        if job_status == "completed":
+            files = data.get("data") or []
+            glb_url = next(
+                (item.get("url") for item in files
+                 if isinstance(item, dict) and str(item.get("type", "")).lower() == "glb"),
+                None
+            )
 
-        if job_status == "COMPLETED":
-            output = data.get("output") or {}
-            model_base64 = output.get("model_base64")
-
-            if not model_base64:
+            if not glb_url:
                 return jsonify({
                     "status": "FAILED",
-                    "error": "RunPod completed but did not return model_base64."
+                    "error": "Tencent completed the job but did not return a GLB URL.",
+                    "raw": data
                 }), 502
 
-            result["model_base64"] = model_base64
+            # Download the GLB on the server, then return it in the format
+            # expected by the existing Odoo JavaScript.
+            model_response = requests.get(glb_url, timeout=120)
+            if not model_response.ok:
+                return jsonify({
+                    "status": "FAILED",
+                    "error": f"Could not download Tencent GLB: HTTP {model_response.status_code}"
+                }), 502
 
-        elif job_status == "FAILED":
-            result["error"] = data.get("error") or data.get("output")
+            model_bytes = model_response.content
+            if not model_bytes:
+                return jsonify({
+                    "status": "FAILED",
+                    "error": "Tencent returned an empty GLB file."
+                }), 502
 
-        return jsonify(result)
+            model_base64 = base64.b64encode(model_bytes).decode("ascii")
+            return jsonify({
+                "status": "COMPLETED",
+                "model_base64": model_base64
+            })
+
+        if job_status == "failed":
+            return jsonify({
+                "status": "FAILED",
+                "error": str(data.get("error") or data.get("message") or data.get("data") or "Tencent 3D generation failed.")
+            })
+
+        # Existing Odoo code waits for anything other than COMPLETED/FAILED.
+        # Normalize Tencent's queued/in_progress statuses.
+        return jsonify({
+            "status": "IN_PROGRESS"
+        })
 
     except requests.RequestException as exc:
-        return jsonify({"error": f"Could not contact RunPod: {exc}"}), 502
+        return jsonify({"error": f"Could not contact Tencent TokenHub: {exc}"}), 502
 
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
