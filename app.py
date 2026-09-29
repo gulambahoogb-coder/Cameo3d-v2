@@ -1,16 +1,24 @@
 """
-Cameo3D - Image-to-3D API (Flask, deploy on Render)
+Cameo3D - Image / Text / Multi-view to 3D API (Flask, deploy on Render)
 
 Backend:
-- Accepts a base64 image from the Cameo3D Odoo website
-- Submits it to Tencent HY 3D Global (Hunyuan 3D 3.1, international)
+- Accepts requests from the Cameo3D Odoo website in three modes:
+    1. Image -> 3D      : image_base64
+    2. Text  -> 3D      : prompt
+    3. Multi-view -> 3D : image_base64 (front) + multi_view [{view, image_base64}]
+- Options from the page: pbr, generate_type, face_count
+- Submits to Tencent HY 3D Global (Hunyuan 3D 3.1, international)
 - Polls until the GLB is ready, then returns it as base64
 
 Render environment variables required:
     TENCENT_SECRET_ID
     TENCENT_SECRET_KEY
+
+Optional: add "Pillow" to requirements.txt to also check image resolution
+(128-5000 px per side) before spending Tencent credits.
 """
 
+import io
 import os
 import json
 import time
@@ -23,6 +31,11 @@ from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
 from tencentcloud.hunyuan.v20230901 import hunyuan_client, models
+
+try:  # optional: resolution check
+    from PIL import Image
+except ImportError:  # pragma: no cover
+    Image = None
 
 app = Flask(__name__)
 
@@ -47,12 +60,25 @@ def add_cors_headers(response):
 
 
 # ---------------------------------------------------------------
-# PROTECTION AGAINST MISUSE (protects your Tencent credits)
+# LIMITS (protect your Tencent credits)
 # ---------------------------------------------------------------
 MAX_JOBS_PER_HOUR = 10                                # per visitor IP
-app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024   # reject uploads > ~12 MB
+app.config["MAX_CONTENT_LENGTH"] = 36 * 1024 * 1024   # up to 4 images of 6 MB each (base64 adds ~33%)
+
+MAX_PROMPT_CHARS = 1000               # Tencent allows 1024; the page limits to 1000
+MAX_IMAGE_BYTES = 6 * 1024 * 1024     # Tencent recommends <= 6 MB per image
+MIN_SIDE, MAX_SIDE = 128, 5000        # Tencent resolution limits per side
+
+# Only these values are accepted, so nobody can send odd options to Tencent.
+ALLOWED_TYPES = {"Normal", "Geometry"}                                   # textured / white model
+ALLOWED_FACE_COUNTS = {50000, 100000, 200000, 500000, 1000000, 1500000}  # matches the page dropdown
+VIEW_NAMES = ("left", "back", "right")                                   # extra views (front = main image)
 
 _hits = {}
+
+
+def client_ip():
+    return (request.headers.get("X-Forwarded-For") or request.remote_addr or "?").split(",")[0].strip()
 
 
 def origin_ok():
@@ -60,16 +86,18 @@ def origin_ok():
     return request.headers.get("Origin", "") in ALLOWED_ORIGINS
 
 
-def too_many_jobs():
-    ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "?").split(",")[0].strip()
+def rate_limited():
+    """True if this visitor already used all jobs this hour. Does NOT count a job."""
+    ip = client_ip()
     now = time.time()
     hits = [t for t in _hits.get(ip, []) if now - t < 3600]
-    if len(hits) >= MAX_JOBS_PER_HOUR:
-        _hits[ip] = hits
-        return True
-    hits.append(now)
     _hits[ip] = hits
-    return False
+    return len(hits) >= MAX_JOBS_PER_HOUR
+
+
+def record_job():
+    """Count one job. Called only after the request passed validation."""
+    _hits.setdefault(client_ip(), []).append(time.time())
 
 
 # ---------------------------------------------------------------
@@ -90,6 +118,141 @@ def hy_client():
     return hunyuan_client.HunyuanClient(cred, "ap-singapore", prof)
 
 
+def friendly_tencent_error(exc):
+    """Log the real error on Render, show visitors a short clear message."""
+    code = ""
+    msg = str(exc)
+    try:
+        code = exc.get_code() or ""
+        msg = exc.get_message() or msg
+    except Exception:
+        pass
+    app.logger.error("Tencent error code=%s message=%s", code, msg)
+    low = (code + " " + msg).lower()
+    if "limit" in low or "concurren" in low:
+        return "The 3D service is busy right now. Please try again in a minute."
+    if any(w in low for w in ("balance", "arrear", "insufficient", "resource")):
+        return "The 3D service is temporarily unavailable. Please try again later."
+    if any(w in low for w in ("risk", "moderat", "sensitive", "illegal", "audit")):
+        return "This input was rejected by the content check. Please try a different image or description."
+    return f"Tencent error: {msg}"
+
+
+# ---------------------------------------------------------------
+# INPUT CHECKS
+# ---------------------------------------------------------------
+class BadInput(Exception):
+    pass
+
+
+def sniff(raw):
+    """Detect the real image type from the file's first bytes."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def read_image(value, label, allowed):
+    """Validate one base64 image. Returns clean base64 text (no data: prefix)."""
+    if not isinstance(value, str) or not value.strip():
+        raise BadInput(f"{label}: no image was provided.")
+    value = value.strip()
+    if value.lower().startswith("data:") and "," in value:
+        value = value.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except Exception:
+        raise BadInput(f"{label}: invalid image data.")
+    if len(raw) > MAX_IMAGE_BYTES:
+        raise BadInput(f"{label} is larger than 6 MB. Please choose a smaller image.")
+    kind = sniff(raw)
+    if kind not in allowed:
+        names = ["JPG" if k == "jpeg" else k.upper() for k in sorted(allowed)]
+        kinds = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " or " + names[-1]
+        raise BadInput(f"{label} must be a {kinds} image.")
+    if Image is not None:
+        try:
+            w, h = Image.open(io.BytesIO(raw)).size
+        except Exception:
+            raise BadInput(f"{label} could not be read as an image.")
+        if min(w, h) < MIN_SIDE or max(w, h) > MAX_SIDE:
+            raise BadInput(f"{label} must be between {MIN_SIDE} and {MAX_SIDE} pixels on each side (yours is {w}x{h}).")
+    return value
+
+
+def parse_options(data):
+    gen = data.get("generate_type") or "Normal"
+    if gen not in ALLOWED_TYPES:
+        raise BadInput("Unknown model type.")
+
+    pbr = data.get("pbr") is True
+    if gen == "Geometry":
+        pbr = False  # white models have no textures, so PBR does not apply
+
+    face = data.get("face_count")
+    if face in (None, "", 0):
+        face = None
+    else:
+        try:
+            face = int(face)
+        except (TypeError, ValueError):
+            raise BadInput("Unsupported polygon count.")
+        if face not in ALLOWED_FACE_COUNTS:
+            raise BadInput("Unsupported polygon count.")
+    return gen, pbr, face
+
+
+def build_payload(data):
+    """Turn the page's request into the Tencent request. Raises BadInput on any problem."""
+    gen, pbr, face = parse_options(data)
+    payload = {"Model": HY_MODEL_VERSION, "GenerateType": gen}
+    if gen == "Normal":
+        payload["EnablePBR"] = pbr
+    if face:
+        payload["FaceCount"] = face
+
+    prompt = data.get("prompt")
+    image = data.get("image_base64")
+    views = data.get("multi_view")
+
+    if prompt is not None and not isinstance(prompt, str):
+        raise BadInput("Invalid text description.")
+    has_prompt = bool(prompt and prompt.strip())
+
+    # ---- Text -> 3D ----
+    if has_prompt:
+        if image or views:
+            raise BadInput("Send either a text description or images, not both.")
+        prompt = prompt.strip()
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise BadInput(f"Description is too long (max {MAX_PROMPT_CHARS} characters).")
+        payload["Prompt"] = prompt
+        return payload
+
+    # ---- Image -> 3D  and  Multi-view -> 3D ----
+    if not image:
+        raise BadInput("No image was provided.")
+    payload["ImageBase64"] = read_image(image, "Image", {"png", "jpeg", "webp"})
+
+    if views:
+        if not isinstance(views, list) or len(views) > len(VIEW_NAMES):
+            raise BadInput("Invalid multi-view data.")
+        seen, out = set(), []
+        for v in views:
+            name = v.get("view") if isinstance(v, dict) else None
+            if name not in VIEW_NAMES or name in seen:
+                raise BadInput("Each extra view must be left, back or right, used once.")
+            seen.add(name)
+            b64 = read_image(v.get("image_base64"), f"{name.capitalize()} view", {"png", "jpeg"})
+            out.append({"ViewType": name, "ViewImageBase64": b64})
+        payload["MultiViewImages"] = out
+    return payload
+
+
 # ---------------------------------------------------------------
 # ROUTES
 # ---------------------------------------------------------------
@@ -106,40 +269,28 @@ def submit():
         return ("", 204)
     if not origin_ok():
         return jsonify({"error": "Forbidden."}), 403
-    if too_many_jobs():
+    if rate_limited():
         return jsonify({"error": "Too many requests. Please try again later."}), 429
     if not SECRET_ID or not SECRET_KEY:
         return jsonify({"error": "TENCENT_SECRET_ID / TENCENT_SECRET_KEY are not set on Render."}), 500
 
     data = request.get_json(silent=True) or {}
-    image_b64 = data.get("image_base64")
-    if not image_b64:
-        return jsonify({"error": "No image was provided."}), 400
-
-    # Remove a possible data-URL prefix.
-    if "," in image_b64 and image_b64.lstrip().lower().startswith("data:"):
-        image_b64 = image_b64.split(",", 1)[1]
-
     try:
-        raw_size = len(base64.b64decode(image_b64, validate=True))
-    except Exception:
-        return jsonify({"error": "Invalid base64 image data."}), 400
+        payload = build_payload(data)
+    except BadInput as exc:
+        return jsonify({"error": str(exc)}), 400
 
-    if raw_size > 6 * 1024 * 1024:
-        return jsonify({"error": "Image is larger than 6 MB. Please choose a smaller image."}), 400
+    record_job()  # only valid requests use up the visitor's hourly allowance
 
     try:
         req = models.SubmitHunyuanTo3DProJobRequest()
-        req.from_json_string(json.dumps({
-            "Model": HY_MODEL_VERSION,
-            "ImageBase64": image_b64,
-            "EnablePBR": True,
-        }))
+        req.from_json_string(json.dumps(payload))
         resp = hy_client().SubmitHunyuanTo3DProJob(req)
         return jsonify({"job_id": resp.JobId})
     except TencentCloudSDKException as exc:
-        return jsonify({"error": f"Tencent error: {exc}"}), 502
+        return jsonify({"error": friendly_tencent_error(exc)}), 502
     except Exception as exc:
+        app.logger.exception("submit failed")
         return jsonify({"error": f"Server error: {exc}"}), 500
 
 
@@ -189,8 +340,9 @@ def status(job_id):
         return jsonify({"status": "IN_PROGRESS"})
 
     except TencentCloudSDKException as exc:
-        return jsonify({"error": f"Tencent error: {exc}"}), 502
+        return jsonify({"error": friendly_tencent_error(exc)}), 502
     except Exception as exc:
+        app.logger.exception("status failed")
         return jsonify({"error": f"Server error: {exc}"}), 500
 
 
