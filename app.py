@@ -73,7 +73,7 @@ def too_many_jobs():
 # Keep this key on the server; never put it in Odoo/frontend code.
 # ---------------------------------------------------------------
 TENCENT_API_KEY = os.environ.get("TENCENT_API_KEY")
-TENCENT_BASE_URL = "https://tokenhub-intl.tencentmaas.com"
+TENCENT_BASE_URL = "https://tokenhub.tencentmaas.com"
 TENCENT_MODEL = "hy-3d-3.1"
 
 TENCENT_HEADERS = {
