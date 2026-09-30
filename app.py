@@ -9,10 +9,13 @@ Backend:
 - Options from the page: pbr, generate_type, face_count
 - Submits to Tencent HY 3D Global (Hunyuan 3D 3.1, international)
 - Polls until the GLB is ready, then returns it as base64
+- /convert turns a finished model into FBX / OBJ / STL / USDZ (Tencent Convert3DFormat, 5 credits)
 
 Render environment variables required:
     TENCENT_SECRET_ID
     TENCENT_SECRET_KEY
+
+Render start command:  gunicorn app:app --timeout 120
 
 Optional: add "Pillow" to requirements.txt to also check image resolution
 (128-5000 px per side) before spending Tencent credits.
@@ -63,6 +66,7 @@ def add_cors_headers(response):
 # LIMITS (protect your Tencent credits)
 # ---------------------------------------------------------------
 MAX_JOBS_PER_HOUR = 10                                # per visitor IP
+MAX_CONVERSIONS_PER_HOUR = 20                         # per visitor IP (each conversion costs 5 Tencent credits)
 app.config["MAX_CONTENT_LENGTH"] = 36 * 1024 * 1024   # up to 4 images of 6 MB each (base64 adds ~33%)
 
 MAX_PROMPT_CHARS = 1000               # Tencent allows 1024; the page limits to 1000
@@ -73,8 +77,10 @@ MIN_SIDE, MAX_SIDE = 128, 5000        # Tencent resolution limits per side
 ALLOWED_TYPES = {"Normal", "Geometry"}                                   # textured / white model
 ALLOWED_FACE_COUNTS = {50000, 100000, 200000, 500000, 1000000, 1500000}  # matches the page dropdown
 VIEW_NAMES = ("left", "back", "right")                                   # extra views (front = main image)
+CONVERT_FORMATS = {"FBX", "OBJ", "STL", "USDZ"}                          # formats the download menu can request
 
 _hits = {}
+_conv_hits = {}
 
 
 def client_ip():
@@ -98,6 +104,19 @@ def rate_limited():
 def record_job():
     """Count one job. Called only after the request passed validation."""
     _hits.setdefault(client_ip(), []).append(time.time())
+
+
+def conversion_limited():
+    """True if this visitor already used all conversions this hour. Does NOT count one."""
+    ip = client_ip()
+    now = time.time()
+    hits = [t for t in _conv_hits.get(ip, []) if now - t < 3600]
+    _conv_hits[ip] = hits
+    return len(hits) >= MAX_CONVERSIONS_PER_HOUR
+
+
+def record_conversion():
+    _conv_hits.setdefault(client_ip(), []).append(time.time())
 
 
 # ---------------------------------------------------------------
@@ -343,6 +362,73 @@ def status(job_id):
         return jsonify({"error": friendly_tencent_error(exc)}), 502
     except Exception as exc:
         app.logger.exception("status failed")
+        return jsonify({"error": f"Server error: {exc}"}), 500
+
+
+@app.route("/convert", methods=["POST", "OPTIONS"])
+def convert():
+    """Convert a finished model to FBX / OBJ / STL / USDZ (Tencent Convert3DFormat, 5 credits)."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+    if not origin_ok():
+        return jsonify({"error": "Forbidden."}), 403
+    if conversion_limited():
+        return jsonify({"error": "Too many conversions. Please try again later."}), 429
+    if not SECRET_ID or not SECRET_KEY:
+        return jsonify({"error": "TENCENT_SECRET_ID / TENCENT_SECRET_KEY are not set on Render."}), 500
+
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    fmt = str(data.get("format", "")).upper()
+
+    if fmt not in CONVERT_FORMATS:
+        return jsonify({"error": "Unsupported format."}), 400
+    if not isinstance(job_id, str) or not job_id.strip() or len(job_id) > 100:
+        return jsonify({"error": "Missing job id."}), 400
+
+    record_conversion()  # only valid requests use up the visitor's hourly allowance
+
+    try:
+        client = hy_client()
+
+        q = models.QueryHunyuanTo3DProJobRequest()
+        q.from_json_string(json.dumps({"JobId": job_id.strip()}))
+        job = client.QueryHunyuanTo3DProJob(q)
+        if str(job.Status or "").upper() != "DONE":
+            return jsonify({"error": "This model is not ready or is no longer available."}), 409
+
+        files = job.ResultFile3Ds or []
+        glb_url = None
+        for f in files:
+            if str(getattr(f, "Type", "")).upper() == "GLB":
+                glb_url = getattr(f, "Url", None)
+                break
+        if not glb_url and files:
+            glb_url = getattr(files[0], "Url", None)
+        if not glb_url:
+            return jsonify({"error": "The original model file is no longer available."}), 410
+
+        c = models.Convert3DFormatRequest()
+        c.from_json_string(json.dumps({"File3D": glb_url, "Format": fmt}))
+        out = client.Convert3DFormat(c)
+        result_url = out.ResultFile3D
+        if not result_url:
+            return jsonify({"error": f"Tencent returned no file for {fmt}."}), 502
+
+        r = requests.get(result_url, timeout=180)
+        if not r.ok or not r.content:
+            return jsonify({"error": "Could not download the converted file."}), 502
+
+        return jsonify({
+            "format": fmt,
+            "filename": "cameo3d-model." + fmt.lower(),
+            "file_base64": base64.b64encode(r.content).decode("ascii"),
+        })
+
+    except TencentCloudSDKException as exc:
+        return jsonify({"error": friendly_tencent_error(exc)}), 502
+    except Exception as exc:
+        app.logger.exception("convert failed")
         return jsonify({"error": f"Server error: {exc}"}), 500
 
 
