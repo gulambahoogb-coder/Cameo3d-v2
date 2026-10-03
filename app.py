@@ -37,6 +37,7 @@ import time
 import base64
 import hmac
 import hashlib
+import secrets
 import datetime
 from contextlib import contextmanager
 
@@ -169,6 +170,8 @@ def _int_env(name, default):
 GEN_COST = _int_env("GEN_COST", 0)          # credits per generation (0 = free)
 CONVERT_COST = _int_env("CONVERT_COST", 0)  # credits per conversion (0 = free)
 SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new account
+ODOO_URL = os.environ.get("ODOO_URL", "https://cameo3d.odoo.com").rstrip("/")
+
 
 @contextmanager
 def cursor():
@@ -432,6 +435,8 @@ def index():
 # ---------------------------------------------------------------
 @app.post("/register")
 def register():
+    if os.environ.get("ALLOW_LOCAL_LOGIN") != "1":
+        return jsonify({"error": "Please sign in on the website."}), 403
     if auth_limited():
         return jsonify({"error": "Too many attempts. Please try again later."}), 429
     d = request.get_json(silent=True) or {}
@@ -450,9 +455,7 @@ def register():
                 "insert into users(email,password_hash) values(%s,%s) returning id",
                 (email, generate_password_hash(password)),
             )
-            uid = cur.fetchone()[0]           
-            if SIGNUP_CREDITS > 0:
-                add_credits(cur, uid, SIGNUP_CREDITS, "signup bonus")
+            uid = cur.fetchone()[0]
     except psycopg2.errors.UniqueViolation:
         return jsonify({"error": "This email is already used."}), 400
     return jsonify({"token": make_jwt(uid)})
@@ -460,6 +463,8 @@ def register():
 
 @app.post("/login")
 def login():
+    if os.environ.get("ALLOW_LOCAL_LOGIN") != "1":
+        return jsonify({"error": "Please sign in on the website."}), 403
     if auth_limited():
         return jsonify({"error": "Too many attempts. Please try again later."}), 429
     d = request.get_json(silent=True) or {}
@@ -485,6 +490,66 @@ def me():
         owned = [r[0] for r in cur.fetchall()]
     return jsonify({"id": request.uid, "email": row[0], "credits": row[1], "owned": owned})
 
+# ---------------------------------------------------------------
+# ROUTES: SIGN IN WITH YOUR ODOO WEBSITE ACCOUNT (no second login)
+# The page sends the visitor's Odoo session id. We ask Odoo if it is a real
+# signed-in user, then give back a credits token for that same person.
+# ---------------------------------------------------------------
+def verify_odoo_session(sid):
+    """Returns the Odoo login of the signed-in visitor, or None."""
+    if not sid or not isinstance(sid, str) or len(sid) > 200:
+        return None
+    try:
+        r = requests.post(
+            ODOO_URL + "/web/session/get_session_info",
+            json={"jsonrpc": "2.0", "method": "call", "params": {}},
+            cookies={"session_id": sid},
+            timeout=15,
+        )
+        info = (r.json() or {}).get("result") or {}
+    except Exception:
+        app.logger.exception("odoo session check failed")
+        return None
+    login = str(info.get("username") or "").strip().lower()
+    if not info.get("uid") or info.get("is_website_user") or not login or login == "public":
+        return None
+    return login
+
+
+def get_or_create_user(login):
+    """Finds the credits account for this Odoo user, or creates it with the signup bonus."""
+    for _ in range(2):
+        try:
+            with cursor() as cur:
+                cur.execute("select id from users where email=%s", (login,))
+                row = cur.fetchone()
+                if row:
+                    return row[0]
+                cur.execute(
+                    "insert into users(email,password_hash) values(%s,%s) returning id",
+                    (login, generate_password_hash(secrets.token_hex(24))),
+                )
+                uid = cur.fetchone()[0]
+                if SIGNUP_CREDITS > 0:
+                    add_credits(cur, uid, SIGNUP_CREDITS, "signup bonus")
+                return uid
+        except psycopg2.errors.UniqueViolation:
+            continue
+    return None
+
+
+@app.post("/auth/odoo")
+def auth_odoo():
+    d = request.get_json(silent=True) or {}
+    login = verify_odoo_session(d.get("sid"))
+    if not login:
+        return jsonify({"error": "Please sign in to your Cameo3D account."}), 401
+    uid = get_or_create_user(login)
+    if not uid:
+        return jsonify({"error": "Could not open your account. Please try again."}), 500
+    return jsonify({"token": make_jwt(uid)})
+
+
 
 # ---------------------------------------------------------------
 # ROUTES: MODEL LIBRARY (preview is public, full file is locked)
@@ -492,9 +557,9 @@ def me():
 @app.get("/library")
 def library():
     with cursor() as cur:
-        cur.execute("select id,title,preview_url,price_credits from models order by id desc")
+        cur.execute("select id,title,preview_url,price_credits,category from models order by id desc")
         rows = cur.fetchall()
-    return jsonify([{"id": r[0], "title": r[1], "preview": r[2], "price": r[3]} for r in rows])
+    return jsonify([{"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4]} for r in rows])
 
 
 @app.get("/library/<int:mid>")
@@ -505,6 +570,7 @@ def library_one(mid):
     if not r:
         return jsonify({"error": "Model not found."}), 404
     return jsonify({"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4], "description": r[5]})
+
 
 @app.post("/library/<int:mid>/download")
 @login_required
