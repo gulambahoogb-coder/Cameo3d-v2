@@ -1,9 +1,7 @@
 flask
 gunicorn
+requests
+tencentcloud-sdk-python
 psycopg2-binary
 PyJWT
-flask-cors
-supabaseflask
-requests
-gunicorn
-tencentcloud-sdk-python-intl-en
+supabase
