@@ -168,7 +168,7 @@ def _int_env(name, default):
 
 GEN_COST = _int_env("GEN_COST", 0)          # credits per generation (0 = free)
 CONVERT_COST = _int_env("CONVERT_COST", 0)  # credits per conversion (0 = free)
-
+SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new account
 
 @contextmanager
 def cursor():
@@ -450,7 +450,9 @@ def register():
                 "insert into users(email,password_hash) values(%s,%s) returning id",
                 (email, generate_password_hash(password)),
             )
-            uid = cur.fetchone()[0]
+            uid = cur.fetchone()[0]           
+            if SIGNUP_CREDITS > 0:
+                add_credits(cur, uid, SIGNUP_CREDITS, "signup bonus")
     except psycopg2.errors.UniqueViolation:
         return jsonify({"error": "This email is already used."}), 400
     return jsonify({"token": make_jwt(uid)})
@@ -498,12 +500,11 @@ def library():
 @app.get("/library/<int:mid>")
 def library_one(mid):
     with cursor() as cur:
-        cur.execute("select id,title,preview_url,price_credits from models where id=%s", (mid,))
+        cur.execute("select id,title,preview_url,price_credits,category,description from models where id=%s", (mid,))
         r = cur.fetchone()
     if not r:
         return jsonify({"error": "Model not found."}), 404
-    return jsonify({"id": r[0], "title": r[1], "preview": r[2], "price": r[3]})
-
+    return jsonify({"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4], "description": r[5]})
 
 @app.post("/library/<int:mid>/download")
 @login_required
