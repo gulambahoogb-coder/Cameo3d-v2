@@ -581,16 +581,14 @@ def library_download(mid):
         if not row:
             return jsonify({"error": "Model not found."}), 404
         path, price = row
-        cur.execute("select 1 from downloads where user_id=%s and model_id=%s", (request.uid, mid))
-        owned = cur.fetchone()
-        if not owned:
-            if price > 0 and not spend_credits(cur, request.uid, price, f"download model {mid}"):
-                return jsonify({"error": "Not enough credits."}), 402
-            cur.execute(
-                "insert into downloads(user_id,model_id) values(%s,%s) on conflict do nothing",
-                (request.uid, mid),
-            )
-    # The user now owns it, so if the link fails they can simply try again for free.
+        # Every download is charged again: there is no "owned forever" access.
+        if price > 0 and not spend_credits(cur, request.uid, price, f"download model {mid}"):
+            return jsonify({"error": "Not enough credits."}), 402
+        cur.execute(
+            "insert into downloads(user_id,model_id) values(%s,%s) on conflict do nothing",
+            (request.uid, mid),
+        )
+    # If the link cannot be made, the credits are given back below.
     try:
         res = get_supabase().storage.from_("models").create_signed_url(path, 60)
         url = res.get("signedURL") or res.get("signedUrl")
@@ -598,7 +596,9 @@ def library_download(mid):
         app.logger.exception("signed url failed model=%s", mid)
         url = None
     if not url:
-        return jsonify({"error": "Could not create the download link. Please try again (you will not be charged twice)."}), 502
+        if price > 0:
+            refund(request.uid, price, f"refund: download link failed model {mid}")
+        return jsonify({"error": "Could not create the download link. Your credits were returned. Please try again."}), 502
     return jsonify({"url": url})
 
 
