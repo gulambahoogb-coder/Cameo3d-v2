@@ -885,7 +885,7 @@ def convert():
 # so a subscription gives the credits again each month.
 # ---------------------------------------------------------------
 PACKS = {
-    "pri_PASTE_YOUR_SANDBOX_PRICE_ID_HERE": 1000,
+    "pri_01m43tdg745t0z2fxfhje4bpqm": 1000,
 }
 
 
