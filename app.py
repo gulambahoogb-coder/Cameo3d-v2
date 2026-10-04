@@ -173,6 +173,8 @@ SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new a
 ODOO_URL = os.environ.get("ODOO_URL", "https://cameo3d.odoo.com").rstrip("/")
 GEN_COST_PBR = _int_env("GEN_COST_PBR", 0)      # extra credits when PBR textures are switched on
 GEN_COST_FACES = _int_env("GEN_COST_FACES", 0)  # extra credits when a custom polygon count is chosen
+GEN_COST_WHITE = _int_env("GEN_COST_WHITE", 0)  # price of a white model (0 = same as GEN_COST)
+GEN_COST_MULTIVIEW = _int_env("GEN_COST_MULTIVIEW", 0)  # extra credits for multi-view input
 
 
 @contextmanager
@@ -632,18 +634,28 @@ def admin_grant():
 # ---------------------------------------------------------------
 def generation_cost(payload):
     """Credits for one generation: base price plus the extras the user switched on."""
-    cost = GEN_COST
+    white = payload.get("GenerateType") == "Geometry" and GEN_COST_WHITE > 0
+    cost = GEN_COST_WHITE if white else GEN_COST
     if payload.get("EnablePBR"):
         cost += GEN_COST_PBR
     if payload.get("FaceCount"):
         cost += GEN_COST_FACES
+    if payload.get("MultiViewImages"):
+        cost += GEN_COST_MULTIVIEW
     return cost
 
 
 @app.get("/costs")
 def costs():
     """Public price list, so the workspace page can show the cost before the user clicks."""
-    return jsonify({"generate": GEN_COST, "pbr": GEN_COST_PBR, "faces": GEN_COST_FACES, "convert": CONVERT_COST})
+    return jsonify({
+        "generate": GEN_COST,
+        "white": GEN_COST_WHITE if GEN_COST_WHITE > 0 else GEN_COST,
+        "pbr": GEN_COST_PBR,
+        "faces": GEN_COST_FACES,
+        "multiview": GEN_COST_MULTIVIEW,
+        "convert": CONVERT_COST,
+    })
 
 
 @app.route("/submit", methods=["POST", "OPTIONS"])
@@ -674,7 +686,7 @@ def submit():
     # Charge only after the request is valid, so mistakes never cost credits.
     if uid:
         if not spend(uid, cost, "generation"):
-            return jsonify({"error": "Not enough credits."}), 402
+            return jsonify({"error": f"Not enough credits. This generation needs {cost} credits. You can buy more on the Pricing page."}), 402
 
     record_job()  # only valid requests use up the visitor's hourly allowance
 
