@@ -880,6 +880,8 @@ def convert():
 #   3. We check the signature, then add the credits ONE time.
 #
 # PACKS: Paddle price id (starts with pri_) -> credits given.
+# GO LIVE: replace these sandbox ids with the LIVE ids, set PADDLE_WEBHOOK_SECRET to the
+# LIVE secret on Render, and delete the /paytest section below. Only one set at a time.
 # Find the price id in Paddle: Catalog > Prices.
 # transaction.completed also fires on every monthly renewal,
 # so a subscription gives the credits again each month.
@@ -906,6 +908,50 @@ def paddle_signature_ok(raw, header, secret):
     return hmac.compare_digest(sent, good)
 
 
+def handle_adjustment(d):
+    """A refund or chargeback was approved: take back the credits that payment gave.
+    Full refunds only. A partial refund is logged so you can fix that balance by hand."""
+    data = d.get("data") or {}
+    adj_id = str(data.get("id") or "")
+    txn_id = str(data.get("transaction_id") or "")
+    if data.get("action") not in ("refund", "chargeback") or data.get("status") != "approved" or not adj_id or not txn_id:
+        return "ignored", 200
+
+    kinds = set((it or {}).get("type") for it in (data.get("items") or []))
+    if "full" not in kinds or "partial" in kinds:
+        app.logger.error("adjustment %s on %s is not a full refund: change the credits by hand", adj_id, txn_id)
+        return "not a full refund", 200
+
+    with cursor() as cur:
+        cur.execute("select 1 from processed_orders where order_id=%s", ("adj:" + adj_id,))
+        if cur.fetchone():
+            return "already done", 200          # Paddle sent it twice: do nothing
+        cur.execute(
+            "select user_id,amount from credit_ledger where reason=%s and amount > 0 limit 1",
+            ("purchase " + txn_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            app.logger.error("adjustment %s: no credits found for purchase %s", adj_id, txn_id)
+            return "no purchase found", 200
+        uid, granted = row
+        cur.execute("select credits from users where id=%s for update", (uid,))
+        bal = cur.fetchone()
+        if not bal:
+            return "unknown user", 200
+        cur.execute("insert into processed_orders(order_id) values(%s)", ("adj:" + adj_id,))
+        take = min(granted, max(bal[0], 0))      # never push the balance below zero
+        if take > 0:
+            cur.execute("update users set credits = credits - %s where id=%s", (take, uid))
+            cur.execute(
+                "insert into credit_ledger(user_id,amount,reason) values(%s,%s,%s)",
+                (uid, -take, f"refund {adj_id} for purchase {txn_id}"),
+            )
+        if take < granted:
+            app.logger.error("adjustment %s: user %s had already spent %s credits", adj_id, uid, granted - take)
+    return "ok", 200
+
+
 @app.post("/webhook/payment")
 def payment_webhook():
     secret = os.environ.get("PADDLE_WEBHOOK_SECRET", "")
@@ -917,7 +963,10 @@ def payment_webhook():
         return "bad signature", 401
 
     d = request.get_json(silent=True) or {}
-    if d.get("event_type") != "transaction.completed":
+    event = d.get("event_type")
+    if event in ("adjustment.created", "adjustment.updated"):
+        return handle_adjustment(d)          # refunds and chargebacks
+    if event != "transaction.completed":
         return "ignored", 200
 
     try:
