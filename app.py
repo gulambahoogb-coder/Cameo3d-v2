@@ -885,7 +885,9 @@ def convert():
 # so a subscription gives the credits again each month.
 # ---------------------------------------------------------------
 PACKS = {
-    "pri_01m43tdg745t0z2fxfhje4bpqm": 1000,
+    "pri_01m43tdg745t0z2fxfhje4bpqm": 1000,   # Starter     $19.90 / month
+    "pri_01m43ymywx2n56kj219cjgv0mh": 1500,   # Pro Creator $29    / month
+    "pri_01m43yq5j0zrv09kcajnvk7sc8": 2750,   # Studio      $49    / month
 }
 
 
