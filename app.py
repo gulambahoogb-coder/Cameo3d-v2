@@ -171,6 +171,8 @@ GEN_COST = _int_env("GEN_COST", 0)          # credits per generation (0 = free)
 CONVERT_COST = _int_env("CONVERT_COST", 0)  # credits per conversion (0 = free)
 SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new account
 ODOO_URL = os.environ.get("ODOO_URL", "https://cameo3d.odoo.com").rstrip("/")
+GEN_COST_PBR = _int_env("GEN_COST_PBR", 0)      # extra credits when PBR textures are switched on
+GEN_COST_FACES = _int_env("GEN_COST_FACES", 0)  # extra credits when a custom polygon count is chosen
 
 
 @contextmanager
@@ -628,6 +630,22 @@ def admin_grant():
 # ---------------------------------------------------------------
 # ROUTES: 3D GENERATION  (costs GEN_COST credits when GEN_COST > 0)
 # ---------------------------------------------------------------
+def generation_cost(payload):
+    """Credits for one generation: base price plus the extras the user switched on."""
+    cost = GEN_COST
+    if payload.get("EnablePBR"):
+        cost += GEN_COST_PBR
+    if payload.get("FaceCount"):
+        cost += GEN_COST_FACES
+    return cost
+
+
+@app.get("/costs")
+def costs():
+    """Public price list, so the workspace page can show the cost before the user clicks."""
+    return jsonify({"generate": GEN_COST, "pbr": GEN_COST_PBR, "faces": GEN_COST_FACES, "convert": CONVERT_COST})
+
+
 @app.route("/submit", methods=["POST", "OPTIONS"])
 def submit():
     if request.method == "OPTIONS":
@@ -651,9 +669,11 @@ def submit():
     except BadInput as exc:
         return jsonify({"error": str(exc)}), 400
 
+    cost = generation_cost(payload)
+
     # Charge only after the request is valid, so mistakes never cost credits.
     if uid:
-        if not spend(uid, GEN_COST, "generation"):
+        if not spend(uid, cost, "generation"):
             return jsonify({"error": "Not enough credits."}), 402
 
     record_job()  # only valid requests use up the visitor's hourly allowance
@@ -667,18 +687,18 @@ def submit():
                 with cursor() as cur:
                     cur.execute(
                         "insert into jobs(job_id,user_id,cost) values(%s,%s,%s) on conflict do nothing",
-                        (resp.JobId, uid, GEN_COST),
+                        (resp.JobId, uid, cost),
                     )
             except Exception:
                 app.logger.exception("could not record job %s", resp.JobId)
         return jsonify({"job_id": resp.JobId})
     except TencentCloudSDKException as exc:
         if uid:
-            refund(uid, GEN_COST, "refund: generation could not start")
+            refund(uid, cost, "refund: generation could not start")
         return jsonify({"error": friendly_tencent_error(exc)}), 502
     except Exception as exc:
         if uid:
-            refund(uid, GEN_COST, "refund: generation could not start")
+            refund(uid, cost, "refund: generation could not start")
         app.logger.exception("submit failed")
         return jsonify({"error": f"Server error: {exc}"}), 500
 
