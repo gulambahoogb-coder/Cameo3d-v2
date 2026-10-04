@@ -45,7 +45,7 @@ import jwt
 import psycopg2
 import psycopg2.errors
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from tencentcloud.common import credential
@@ -956,6 +956,44 @@ def payment_webhook():
         cur.execute("insert into processed_orders(order_id) values(%s)", (txn_id,))
         add_credits(cur, uid, credits, f"purchase {txn_id}")
     return "ok", 200
+
+
+
+# ---------------------------------------------------------------
+# TEMPORARY SANDBOX TEST PAGE: open /paytest to try a Paddle payment.
+# DELETE this whole section before going live.
+# ---------------------------------------------------------------
+PAYTEST_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Cameo3D payment test</title>
+<script src="https://cdn.paddle.com/paddle/v2/paddle.js"></script></head>
+<body style="font-family:sans-serif;max-width:480px;margin:40px auto">
+<h2>Cameo3D payment test (sandbox)</h2>
+<p>Client-side token (starts with test_)</p><input id="tok" style="width:100%">
+<p>Price ID (starts with pri_)</p><input id="pri" style="width:100%">
+<p>User ID</p><input id="uid" value="1" style="width:100%">
+<br><br><button id="go" style="padding:10px 20px">Buy</button>
+<script>
+var started = false;
+document.getElementById("go").onclick = function () {
+  var t = document.getElementById("tok").value.trim();
+  var p = document.getElementById("pri").value.trim();
+  var u = document.getElementById("uid").value.trim();
+  if (!started) {
+    Paddle.Environment.set("sandbox");
+    Paddle.Initialize({ token: t });
+    started = true;
+  }
+  Paddle.Checkout.open({
+    items: [{ priceId: p, quantity: 1 }],
+    customData: { user_id: u }
+  });
+};
+</script></body></html>"""
+
+
+@app.get("/paytest")
+def paytest():
+    return Response(PAYTEST_HTML, mimetype="text/html")
 
 
 if __name__ == "__main__":
