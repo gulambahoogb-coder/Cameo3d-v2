@@ -6,8 +6,8 @@ What this file does:
 - Accounts:        /register  /login  /me
 - Model library:   /library  /library/<id>  /library/<id>/download  (full file is locked)
 - Credits:         one balance per user, spent on generations, conversions and paid downloads
-- Admin:           /admin/grant  (give test credits by hand, before billing exists)
-- Billing (later): /checkout/<variant>  and  /webhook/payment  (Lemon Squeezy, switched off until configured)
+- Admin:           /admin/grant  (give test credits by hand)
+- Billing:         /webhook/payment  (Paddle, switched off until PADDLE_WEBHOOK_SECRET is set)
 
 Render environment variables:
     TENCENT_SECRET_ID          (already set)
@@ -21,7 +21,7 @@ Render environment variables:
 Optional environment variables:
     GEN_COST                   credits per generation   (default 0 = free, login not required)
     CONVERT_COST               credits per conversion   (default 0 = free, login not required)
-    LS_WEBHOOK_SECRET          Lemon Squeezy signing secret (only when billing is turned on)
+    PADDLE_WEBHOOK_SECRET      Paddle notification destination secret (only when billing is turned on)
 
 Render start command:  gunicorn app:app --timeout 120
 
@@ -870,65 +870,91 @@ def convert():
 
 
 # ---------------------------------------------------------------
-# BILLING (LATER): Lemon Squeezy buys credits automatically.
-# Switched off until LS_WEBHOOK_SECRET is set on Render.
-# Fill in PACKS and CHECKOUT_LINKS with your real Lemon Squeezy values.
+# BILLING: Paddle adds credits automatically after a payment.
+# Switched off until PADDLE_WEBHOOK_SECRET is set on Render.
+#
+# How it works:
+#   1. The website opens the Paddle checkout and sends the user's id
+#      (from /me) as customData: { user_id: ... }
+#   2. The user pays. Paddle calls POST /webhook/payment on this server.
+#   3. We check the signature, then add the credits ONE time.
+#
+# PACKS: Paddle price id (starts with pri_) -> credits given.
+# Find the price id in Paddle: Catalog > Prices.
+# transaction.completed also fires on every monthly renewal,
+# so a subscription gives the credits again each month.
 # ---------------------------------------------------------------
 PACKS = {
-    # "variant id from Lemon Squeezy": credits given
-    "111111": 100,
-    "222222": 300,
-}
-CHECKOUT_LINKS = {
-    "111111": "https://YOURSTORE.lemonsqueezy.com/buy/AAAA",
-    "222222": "https://YOURSTORE.lemonsqueezy.com/buy/BBBB",
+    "pri_PASTE_YOUR_SANDBOX_PRICE_ID_HERE": 1000,
 }
 
 
-@app.get("/checkout/<variant>")
-@login_required
-def checkout(variant):
-    base = CHECKOUT_LINKS.get(variant)
-    if not base or "YOURSTORE" in base:
-        return jsonify({"error": "This pack is not available yet."}), 404
-    return jsonify({"url": f"{base}?checkout[custom][user_id]={request.uid}"})
+def paddle_signature_ok(raw, header, secret):
+    """Checks the Paddle-Signature header ("ts=...;h1=...") against the raw request body."""
+    try:
+        parts = dict(p.split("=", 1) for p in header.split(";"))
+        ts = parts["ts"]
+        sent = parts["h1"]
+        if abs(time.time() - int(ts)) > 300:  # reject very old messages
+            return False
+    except Exception:
+        return False
+    signed = ts.encode() + b":" + raw
+    good = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sent, good)
 
 
 @app.post("/webhook/payment")
 def payment_webhook():
-    secret = os.environ.get("LS_WEBHOOK_SECRET", "")
+    secret = os.environ.get("PADDLE_WEBHOOK_SECRET", "")
     if not secret:
         return "billing not enabled", 503
 
     raw = request.get_data()
-    sent = request.headers.get("X-Signature", "")
-    good = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sent, good):
+    if not paddle_signature_ok(raw, request.headers.get("Paddle-Signature", ""), secret):
         return "bad signature", 401
 
     d = request.get_json(silent=True) or {}
+    if d.get("event_type") != "transaction.completed":
+        return "ignored", 200
+
     try:
-        if d["meta"]["event_name"] != "order_created":
-            return "ignored", 200
-        attrs = d["data"]["attributes"]
-        if attrs.get("status") != "paid":
-            return "not paid", 200
-        order_id = str(d["data"]["id"])
-        uid = int(d["meta"]["custom_data"]["user_id"])
-        variant = str(attrs["first_order_item"]["variant_id"])
-    except (KeyError, TypeError, ValueError):
+        data = d["data"]
+        txn_id = str(data["id"])
+        items = data.get("items") or []
+    except (KeyError, TypeError):
         return "bad payload", 400
 
-    credits = PACKS.get(variant)
-    if not credits:
+    # Which user paid? The website sends it as customData.user_id
+    try:
+        uid = int((data.get("custom_data") or {})["user_id"])
+    except (KeyError, TypeError, ValueError):
+        app.logger.error("paddle payment %s has no valid user_id in custom_data", txn_id)
+        return "no user id", 200  # 200 so Paddle does not retry forever
+
+    # How many credits did they buy?
+    credits = 0
+    for item in items:
+        price_id = str(((item.get("price") or {}).get("id")) or "")
+        try:
+            qty = int(item.get("quantity") or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        credits += PACKS.get(price_id, 0) * qty
+    if credits <= 0:
+        app.logger.error("paddle payment %s has no price id listed in PACKS", txn_id)
         return "unknown pack", 200
 
     with cursor() as cur:
-        cur.execute("select 1 from processed_orders where order_id=%s", (order_id,))
+        cur.execute("select 1 from users where id=%s", (uid,))
+        if not cur.fetchone():
+            app.logger.error("paddle payment %s: user %s does not exist", txn_id, uid)
+            return "unknown user", 200
+        cur.execute("select 1 from processed_orders where order_id=%s", (txn_id,))
         if cur.fetchone():
-            return "already done", 200  # the gateway retried: never add credits twice
-        cur.execute("insert into processed_orders(order_id) values(%s)", (order_id,))
-        add_credits(cur, uid, credits, f"purchase order {order_id}")
+            return "already done", 200  # Paddle retried: never add credits twice
+        cur.execute("insert into processed_orders(order_id) values(%s)", (txn_id,))
+        add_credits(cur, uid, credits, f"purchase {txn_id}")
     return "ok", 200
 
 
