@@ -1046,6 +1046,7 @@ document.getElementById("go").onclick = function () {
 def paytest():
     return Response(PAYTEST_HTML, mimetype="text/html")
 
-
+from polar_billing import register_polar
+register_polar(app, cursor, add_credits, current_user, origin_ok, auth_limited)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
