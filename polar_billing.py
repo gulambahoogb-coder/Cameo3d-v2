@@ -14,7 +14,9 @@ Render environment variables:
     POLAR_PRODUCT_STUDIO     Polar product id of the $49 plan     (2750 credits)
 
 Optional:
-    POLAR_SUCCESS_URL        where the user lands after paying (default: your Odoo /workspace-1)
+    POLAR_SUCCESS_URL        where the user lands after paying (default: ODOO_URL + /workspace-1,
+                             which is https://www.cameo3d.com/workspace-1)
+    ODOO_URL                 your primary website domain, e.g. https://www.cameo3d.com (no slash at the end)
 
 Sandbox and production are two separate Polar accounts: each has its own token,
 webhook secret and product ids. When you go live, just replace those 5 values on Render
@@ -94,7 +96,7 @@ def _signature_ok(raw, headers, secret):
 def register_polar(app, cursor, add_credits, current_user, origin_ok, auth_limited):
     """Adds the two Polar routes to the existing Flask app."""
 
-    odoo_url = os.environ.get("ODOO_URL", "https://cameo3d.com").rstrip("/")
+    odoo_url = os.environ.get("ODOO_URL", "https://www.cameo3d.com").rstrip("/")
 
     # -----------------------------------------------------------
     # 1) CHECKOUT: the website calls this when the user clicks a plan
