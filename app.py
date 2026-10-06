@@ -65,8 +65,8 @@ app = Flask(__name__)
 # PERMISSION FOR YOUR ODOO WEBSITE (CORS)
 # ---------------------------------------------------------------
 ALLOWED_ORIGINS = [
-    "https://cameo3d.odoo.com",
-    "https://www.cameo3d.odoo.com",
+    "https://cameo3d.com",
+    "https://www.cameo3d.com",
 ]
 
 
@@ -170,7 +170,7 @@ def _int_env(name, default):
 GEN_COST = _int_env("GEN_COST", 0)          # credits per generation (0 = free)
 CONVERT_COST = _int_env("CONVERT_COST", 0)  # credits per conversion (0 = free)
 SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new account
-ODOO_URL = os.environ.get("ODOO_URL", "https://cameo3d.odoo.com").rstrip("/")
+ODOO_URL = os.environ.get("ODOO_URL", "https://cameo3d.com").rstrip("/")
 GEN_COST_PBR = _int_env("GEN_COST_PBR", 0)      # extra credits when PBR textures are switched on
 GEN_COST_FACES = _int_env("GEN_COST_FACES", 0)  # extra credits when a custom polygon count is chosen
 GEN_COST_WHITE = _int_env("GEN_COST_WHITE", 0)  # price of a white model (0 = same as GEN_COST)
