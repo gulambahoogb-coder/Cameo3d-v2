@@ -94,7 +94,7 @@ def _signature_ok(raw, headers, secret):
 def register_polar(app, cursor, add_credits, current_user, origin_ok, auth_limited):
     """Adds the two Polar routes to the existing Flask app."""
 
-    odoo_url = os.environ.get("ODOO_URL", "https://cameo3d.odoo.com").rstrip("/")
+    odoo_url = os.environ.get("ODOO_URL", "https://cameo3d.com").rstrip("/")
 
     # -----------------------------------------------------------
     # 1) CHECKOUT: the website calls this when the user clicks a plan
