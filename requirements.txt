@@ -5,3 +5,4 @@ tencentcloud-sdk-python
 psycopg2-binary
 PyJWT
 supabase
+tencentcloud-sdk-python-intl-en
