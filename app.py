@@ -9,13 +9,15 @@ What this file does:
 - Admin:           /admin/grant  (give test credits by hand)
 - Billing:         /webhook/payment  (Paddle, switched off until PADDLE_WEBHOOK_SECRET is set)
 
+Tencent calls use call_json (action name + dict), so they work on any SDK version.
+
 Render environment variables:
     TENCENT_SECRET_ID          (already set)
     TENCENT_SECRET_KEY         (already set)
     DATABASE_URL               Supabase "Session pooler" connection string
     SUPABASE_URL               https://zpnokntlfjjayzttjuzv.supabase.co
     SUPABASE_SERVICE_KEY       Supabase secret key
-    JWT_SECRET                 any long random text
+    JWT_SECRET                 any long random text (32+ characters)
     ADMIN_KEY                  any other long random text
     ODOO_URL                   https://www.cameo3d.com   (the PRIMARY domain set in Odoo, no slash at the end)
 
@@ -53,7 +55,7 @@ from tencentcloud.common import credential
 from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
-from tencentcloud.hunyuan.v20230901 import hunyuan_client, models
+from tencentcloud.hunyuan.v20230901 import hunyuan_client
 
 try:  # optional: resolution check
     from PIL import Image
@@ -288,6 +290,22 @@ def hy_client():
     prof = ClientProfile()
     prof.httpProfile = http
     return hunyuan_client.HunyuanClient(cred, "ap-singapore", prof)
+
+
+def hy_call(action, params):
+    """Call a Tencent HY API by name. Works on any SDK version. Returns the 'Response' dict."""
+    return hy_client().call_json(action, params)["Response"]
+
+
+def pick_glb_url(files):
+    """From a ResultFile3Ds list, return the GLB url (or the first file's url)."""
+    files = files or []
+    for f in files:
+        if str(f.get("Type", "")).upper() == "GLB":
+            return f.get("Url")
+    if files:
+        return files[0].get("Url")
+    return None
 
 
 def friendly_tencent_error(exc):
@@ -698,19 +716,18 @@ def submit():
     record_job()  # only valid requests use up the visitor's hourly allowance
 
     try:
-        req = models.SubmitHunyuanTo3DProJobRequest()
-        req.from_json_string(json.dumps(payload))
-        resp = hy_client().SubmitHunyuanTo3DProJob(req)
+        resp = hy_call("SubmitHunyuanTo3DProJob", payload)
+        job_id = resp["JobId"]
         if uid:
             try:
                 with cursor() as cur:
                     cur.execute(
                         "insert into jobs(job_id,user_id,cost) values(%s,%s,%s) on conflict do nothing",
-                        (resp.JobId, uid, cost),
+                        (job_id, uid, cost),
                     )
             except Exception:
-                app.logger.exception("could not record job %s", resp.JobId)
-        return jsonify({"job_id": resp.JobId})
+                app.logger.exception("could not record job %s", job_id)
+        return jsonify({"job_id": job_id})
     except TencentCloudSDKException as exc:
         if uid:
             refund(uid, cost, "refund: generation could not start")
@@ -732,20 +749,11 @@ def status(job_id):
         return jsonify({"error": "TENCENT_SECRET_ID / TENCENT_SECRET_KEY are not set on Render."}), 500
 
     try:
-        req = models.QueryHunyuanTo3DProJobRequest()
-        req.from_json_string(json.dumps({"JobId": job_id}))
-        resp = hy_client().QueryHunyuanTo3DProJob(req)
-        st = str(resp.Status or "").upper()
+        resp = hy_call("QueryHunyuanTo3DProJob", {"JobId": job_id})
+        st = str(resp.get("Status") or "").upper()
 
         if st == "DONE":
-            files = resp.ResultFile3Ds or []
-            glb_url = None
-            for f in files:
-                if str(getattr(f, "Type", "")).upper() == "GLB":
-                    glb_url = getattr(f, "Url", None)
-                    break
-            if not glb_url and files:
-                glb_url = getattr(files[0], "Url", None)
+            glb_url = pick_glb_url(resp.get("ResultFile3Ds"))
             if not glb_url:
                 if GEN_COST > 0:
                     refund_job(job_id)
@@ -765,7 +773,7 @@ def status(job_id):
                 refund_job(job_id)  # credits go back once, automatically
             return jsonify({
                 "status": "FAILED",
-                "error": str(getattr(resp, "ErrorMessage", None) or "Generation failed."),
+                "error": str(resp.get("ErrorMessage") or "Generation failed."),
             })
 
         # WAIT or RUN
@@ -790,29 +798,16 @@ class ConvertError(Exception):
 
 def run_conversion(job_id, fmt):
     """Convert a finished model. Returns the JSON result or raises ConvertError."""
-    client = hy_client()
-
-    q = models.QueryHunyuanTo3DProJobRequest()
-    q.from_json_string(json.dumps({"JobId": job_id}))
-    job = client.QueryHunyuanTo3DProJob(q)
-    if str(job.Status or "").upper() != "DONE":
+    job = hy_call("QueryHunyuanTo3DProJob", {"JobId": job_id})
+    if str(job.get("Status") or "").upper() != "DONE":
         raise ConvertError("This model is not ready or is no longer available.", 409)
 
-    files = job.ResultFile3Ds or []
-    glb_url = None
-    for f in files:
-        if str(getattr(f, "Type", "")).upper() == "GLB":
-            glb_url = getattr(f, "Url", None)
-            break
-    if not glb_url and files:
-        glb_url = getattr(files[0], "Url", None)
+    glb_url = pick_glb_url(job.get("ResultFile3Ds"))
     if not glb_url:
         raise ConvertError("The original model file is no longer available.", 410)
 
-    c = models.Convert3DFormatRequest()
-    c.from_json_string(json.dumps({"File3D": glb_url, "Format": fmt}))
-    out = client.Convert3DFormat(c)
-    result_url = out.ResultFile3D
+    out = hy_call("Convert3DFormat", {"File3D": glb_url, "Format": fmt})
+    result_url = out.get("ResultFile3D")
     if not result_url:
         raise ConvertError(f"Tencent returned no file for {fmt}.", 502)
 
