@@ -17,6 +17,7 @@ Render environment variables:
     SUPABASE_SERVICE_KEY       Supabase secret key
     JWT_SECRET                 any long random text
     ADMIN_KEY                  any other long random text
+    ODOO_URL                   https://www.cameo3d.com   (the PRIMARY domain set in Odoo, no slash at the end)
 
 Optional environment variables:
     GEN_COST                   credits per generation   (default 0 = free, login not required)
@@ -170,7 +171,7 @@ def _int_env(name, default):
 GEN_COST = _int_env("GEN_COST", 0)          # credits per generation (0 = free)
 CONVERT_COST = _int_env("CONVERT_COST", 0)  # credits per conversion (0 = free)
 SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new account
-ODOO_URL = os.environ.get("ODOO_URL", "https://cameo3d.com").rstrip("/")
+ODOO_URL = os.environ.get("ODOO_URL", "https://www.cameo3d.com").rstrip("/")
 GEN_COST_PBR = _int_env("GEN_COST_PBR", 0)      # extra credits when PBR textures are switched on
 GEN_COST_FACES = _int_env("GEN_COST_FACES", 0)  # extra credits when a custom polygon count is chosen
 GEN_COST_WHITE = _int_env("GEN_COST_WHITE", 0)  # price of a white model (0 = same as GEN_COST)
@@ -510,6 +511,12 @@ def verify_odoo_session(sid):
             cookies={"session_id": sid},
             timeout=15,
         )
+        if r.status_code != 200 or r.history:
+            # Shows in the Render logs if Odoo redirects (wrong ODOO_URL) instead of answering.
+            app.logger.warning(
+                "odoo session check: status=%s redirects=%s final_url=%s (ODOO_URL=%s)",
+                r.status_code, [h.status_code for h in r.history], r.url, ODOO_URL,
+            )
         info = (r.json() or {}).get("result") or {}
     except Exception:
         app.logger.exception("odoo session check failed")
