@@ -23,7 +23,8 @@ Render environment variables:
 
 Optional environment variables:
     GEN_COST                   credits per generation   (default 0 = free, login not required)
-    CONVERT_COST               credits per conversion   (default 0 = free, login not required)
+    CONVERT_COST               credits per non-GLB download (default 5; GLB is always free)
+    CONVERT_COST_FBX           optional price for one format (also _OBJ, _STL, _USDZ)
     PADDLE_WEBHOOK_SECRET      Paddle notification destination secret (only when billing is turned on)
 
 Render start command:  gunicorn app:app --timeout 120
@@ -171,13 +172,17 @@ def _int_env(name, default):
 
 
 GEN_COST = _int_env("GEN_COST", 0)          # credits per generation (0 = free)
-CONVERT_COST = _int_env("CONVERT_COST", 0)  # credits per conversion (0 = free)
+CONVERT_COST = _int_env("CONVERT_COST", 5)  # credits per conversion (Tencent charges 5 per conversion)
 SIGNUP_CREDITS = _int_env("SIGNUP_CREDITS", 100)  # free credits for every new account
 ODOO_URL = os.environ.get("ODOO_URL", "https://www.cameo3d.com").rstrip("/")
 GEN_COST_PBR = _int_env("GEN_COST_PBR", 0)      # extra credits when PBR textures are switched on
 GEN_COST_FACES = _int_env("GEN_COST_FACES", 0)  # extra credits when a custom polygon count is chosen
 GEN_COST_WHITE = _int_env("GEN_COST_WHITE", 0)  # price of a white model (0 = same as GEN_COST)
 GEN_COST_MULTIVIEW = _int_env("GEN_COST_MULTIVIEW", 0)  # extra credits for multi-view input
+
+# Price per download format. GLB is not listed on purpose: it is free with the generation.
+# Change one format on Render with a variable, e.g. CONVERT_COST_USDZ=8
+CONVERT_COSTS = {f: _int_env("CONVERT_COST_" + f, CONVERT_COST) for f in CONVERT_FORMATS}
 
 
 @contextmanager
@@ -680,6 +685,7 @@ def costs():
         "faces": GEN_COST_FACES,
         "multiview": GEN_COST_MULTIVIEW,
         "convert": CONVERT_COST,
+        "convert_formats": CONVERT_COSTS,
     })
 
 
@@ -787,7 +793,7 @@ def status(job_id):
 
 
 # ---------------------------------------------------------------
-# ROUTES: FORMAT CONVERSION  (costs CONVERT_COST credits when CONVERT_COST > 0)
+# ROUTES: FORMAT CONVERSION  (each non-GLB download costs credits; GLB is free)
 # ---------------------------------------------------------------
 class ConvertError(Exception):
     def __init__(self, message, code):
@@ -844,12 +850,13 @@ def convert():
         return jsonify({"error": "Missing job id."}), 400
     job_id = job_id.strip()
 
+    cost = CONVERT_COSTS[fmt]  # charged again on every download, even of the same model
     uid = None
-    if CONVERT_COST > 0:
+    if cost > 0:
         uid = current_user()
         if not uid:
             return jsonify({"error": "Please log in to download this format."}), 401
-        if not spend(uid, CONVERT_COST, f"convert {fmt}"):
+        if not spend(uid, cost, f"convert {fmt}"):
             return jsonify({"error": "Not enough credits."}), 402
 
     record_conversion()  # only valid requests use up the visitor's hourly allowance
@@ -858,15 +865,15 @@ def convert():
         return jsonify(run_conversion(job_id, fmt))
     except ConvertError as exc:
         if uid:
-            refund(uid, CONVERT_COST, f"refund: convert {fmt} failed")
+            refund(uid, cost, f"refund: convert {fmt} failed")
         return jsonify({"error": exc.message}), exc.code
     except TencentCloudSDKException as exc:
         if uid:
-            refund(uid, CONVERT_COST, f"refund: convert {fmt} failed")
+            refund(uid, cost, f"refund: convert {fmt} failed")
         return jsonify({"error": friendly_tencent_error(exc)}), 502
     except Exception as exc:
         if uid:
-            refund(uid, CONVERT_COST, f"refund: convert {fmt} failed")
+            refund(uid, cost, f"refund: convert {fmt} failed")
         app.logger.exception("convert failed")
         return jsonify({"error": f"Server error: {exc}"}), 500
 
