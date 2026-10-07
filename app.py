@@ -42,6 +42,7 @@ import base64
 import hmac
 import hashlib
 import secrets
+import threading
 import datetime
 from contextlib import contextmanager
 
@@ -277,6 +278,24 @@ def login_required(f):
 def get_supabase():
     from supabase import create_client
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
+
+
+def _save_generation(job_id, content):
+    """Background: copy a finished model into the private 'generations' bucket. Never affects the user."""
+    try:
+        with cursor() as cur:
+            cur.execute("select user_id, file_path from jobs where job_id=%s", (job_id,))
+            row = cur.fetchone()
+        if not row or row[1]:
+            return  # not a tracked job, or already saved
+        path = f"{row[0]}/{job_id}.glb"
+        get_supabase().storage.from_("generations").upload(
+            path, content, {"content-type": "model/gltf-binary", "upsert": "true"}
+        )
+        with cursor() as cur:
+            cur.execute("update jobs set file_path=%s, status='saved' where job_id=%s", (path, job_id))
+    except Exception:
+        app.logger.exception("save generation failed job=%s", job_id)
 
 
 # ---------------------------------------------------------------
@@ -768,6 +787,8 @@ def status(job_id):
             r = requests.get(glb_url, timeout=120)
             if not r.ok or not r.content:
                 return jsonify({"status": "FAILED", "error": "Could not download the GLB file."})
+
+            threading.Thread(target=_save_generation, args=(job_id, r.content), daemon=True).start()
 
             return jsonify({
                 "status": "COMPLETED",
