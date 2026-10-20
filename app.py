@@ -1078,5 +1078,7 @@ def paytest():
 
 from polar_billing import register_polar
 register_polar(app, cursor, add_credits, current_user, origin_ok, auth_limited)
+from rig import register_rig
+register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy_call, pick_glb_url, friendly_tencent_error, get_supabase)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
