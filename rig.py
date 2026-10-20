@@ -82,11 +82,18 @@ def register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok
         if not glb_url:
             raise RigError("The original model file is no longer available.", 410)
 
+        return rig_from_glb_url(glb_url)
+
+    def rig_from_glb_url(glb_url):
+        """GLB url -> FBX (5 credits) -> rigging job. Returns the rigging job id."""
         conv = hy_call("Convert3DFormat", {"File3D": glb_url, "Format": "FBX"})
         fbx_url = conv.get("ResultFile3D")
         if not fbx_url:
             raise RigError("Could not prepare the model for rigging.", 502)
+        return rig_from_fbx_url(fbx_url)
 
+    def rig_from_fbx_url(fbx_url):
+        """FBX url -> rigging job (10 credits). Returns the rigging job id."""
         resp = hy_call("SubmitAutoRiggingJob", {"File3D": {"Url": fbx_url, "Type": "FBX"}})
         rig_id = resp.get("JobId")
         if not rig_id:
@@ -218,6 +225,42 @@ def register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok
             return jsonify({"error": f"Server error: {exc}"}), 500
 
     # -----------------------------------------------------------
+    # ADMIN TEST: rig a file from your own computer (no generation needed).
+    # FBX file = 10 Tencent credits. GLB file = 15 (5 to convert + 10 to rig).
+    # -----------------------------------------------------------
+    @app.post("/rig/submit-file")
+    def rig_submit_file():
+        if not is_admin():
+            return jsonify({"error": "Forbidden."}), 403
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return jsonify({"error": "Choose a .fbx or .glb file."}), 400
+        ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+        if ext not in ("fbx", "glb"):
+            return jsonify({"error": "Only .fbx or .glb files."}), 400
+        content = f.read()
+        if not content or len(content) > 30 * 1024 * 1024:
+            return jsonify({"error": "File is empty or larger than 30 MB."}), 400
+        try:
+            import secrets
+            path = f"admintest/{secrets.token_hex(8)}.{ext}"
+            bucket = get_supabase().storage.from_("generations")
+            bucket.upload(path, content, {"content-type": "application/octet-stream", "upsert": "true"})
+            res = bucket.create_signed_url(path, 3600)
+            url = res.get("signedURL") or res.get("signedUrl")
+            if not url:
+                return jsonify({"error": "Could not make a link for the uploaded file."}), 502
+            rig_id = rig_from_fbx_url(url) if ext == "fbx" else rig_from_glb_url(url)
+            return jsonify({"rig_job_id": rig_id})
+        except RigError as exc:
+            return jsonify({"error": exc.message}), exc.code
+        except TencentCloudSDKException as exc:
+            return jsonify({"error": friendly_tencent_error(exc)}), 502
+        except Exception as exc:
+            app.logger.exception("rig submit-file failed")
+            return jsonify({"error": f"Server error: {exc}"}), 500
+
+    # -----------------------------------------------------------
     # TEMPORARY ADMIN TEST PAGE. DELETE this section after testing.
     # Needs your ADMIN_KEY. Does not charge any user credits.
     # -----------------------------------------------------------
@@ -228,6 +271,9 @@ def register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok
 <p>ADMIN_KEY</p><input id="k" type="password" style="width:100%">
 <p>Generation job id (from a finished generation)</p><input id="j" style="width:100%">
 <p><button onclick="go()">1. Start rigging</button></p>
+<p><b>Or</b> test with a file from your computer (no generation needed):</p>
+<input id="f" type="file" accept=".fbx,.glb">
+<p><button onclick="goFile()">1b. Start rigging with my file</button></p>
 <p>Rig job id</p><input id="r" style="width:100%">
 <p><button onclick="check()">2. Check result</button></p>
 <pre id="o" style="white-space:pre-wrap"></pre><div id="d"></div>
@@ -236,6 +282,13 @@ function hd(){return {"X-Admin-Key":document.getElementById("k").value.trim(),"C
 function out(x){document.getElementById("o").textContent=JSON.stringify(x,null,2);}
 async function go(){
   var r=await fetch("/rig/submit",{method:"POST",headers:hd(),body:JSON.stringify({job_id:document.getElementById("j").value.trim()})});
+  var d=await r.json(); out(d); if(d.rig_job_id){document.getElementById("r").value=d.rig_job_id;}
+}
+async function goFile(){
+  var file=document.getElementById("f").files[0];
+  if(!file){out({error:"Choose a file first."});return;}
+  var fd=new FormData(); fd.append("file",file);
+  var r=await fetch("/rig/submit-file",{method:"POST",headers:{"X-Admin-Key":document.getElementById("k").value.trim()},body:fd});
   var d=await r.json(); out(d); if(d.rig_job_id){document.getElementById("r").value=d.rig_job_id;}
 }
 async function check(){
