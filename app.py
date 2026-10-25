@@ -445,17 +445,19 @@ def build_payload(data):
     has_prompt = bool(prompt and prompt.strip())
 
     # ---- Text -> 3D ----
+        # START: TEXT TO 3D PART OF build_payload
     if has_prompt:
         if (image or views) and gen != "Sketch":
             raise BadInput("Send either a text description or images, not both.")
         prompt = prompt.strip()
         if len(prompt) > MAX_PROMPT_CHARS:
             raise BadInput(f"Description is too long (max {MAX_PROMPT_CHARS} characters).")
-       payload["Prompt"] = prompt
+        payload["Prompt"] = prompt
         if gen != "Sketch" or not image:
             if gen == "Sketch":
                 raise BadInput("Sketch mode needs a sketch image.")
             return payload
+    # END: TEXT TO 3D PART OF build_payload
 
     # ---- Image -> 3D  and  Multi-view -> 3D ----
     if not image:
