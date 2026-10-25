@@ -106,7 +106,7 @@ MAX_IMAGE_BYTES = 6 * 1024 * 1024     # Tencent recommends <= 6 MB per image
 MIN_SIDE, MAX_SIDE = 128, 5000        # Tencent resolution limits per side
 
 # Only these values are accepted, so nobody can send odd options to Tencent.
-ALLOWED_TYPES = {"Normal", "Geometry"}                                   # textured / white model
+ALLOWED_TYPES = {"Normal", "Geometry", "LowPoly", "Sketch"}                                  # textured / white model
 ALLOWED_FACE_COUNTS = {50000, 100000, 200000, 500000, 1000000, 1500000}  # matches the page dropdown
 VIEW_NAMES = ("left", "back", "right")                                   # extra views (front = main image)
 CONVERT_FORMATS = {"FBX", "OBJ", "STL", "USDZ"}                          # formats the download menu can request
@@ -179,7 +179,9 @@ ODOO_URL = os.environ.get("ODOO_URL", "https://www.cameo3d.com").rstrip("/")
 GEN_COST_PBR = _int_env("GEN_COST_PBR", 0)      # extra credits when PBR textures are switched on
 GEN_COST_FACES = _int_env("GEN_COST_FACES", 0)  # extra credits when a custom polygon count is chosen
 GEN_COST_WHITE = _int_env("GEN_COST_WHITE", 0)  # price of a white model (0 = same as GEN_COST)
-GEN_COST_MULTIVIEW = _int_env("GEN_COST_MULTIVIEW", 0)  # extra credits for multi-view input
+GEN_COST_MULTIVIEW = _int_env("GEN_COST_MULTIVIEW", 0)
+GEN_COST_LOWPOLY = _int_env("GEN_COST_LOWPOLY", 0)   # 0 = same price as a normal generation
+GEN_COST_SKETCH = _int_env("GEN_COST_SKETCH", 0)# extra credits for multi-view input
 
 # Price per download format. GLB is not listed on purpose: it is free with the generation.
 # Change one format on Render with a variable, e.g. CONVERT_COST_USDZ=8
@@ -424,9 +426,14 @@ def build_payload(data):
     """Turn the page's request into the Tencent request. Raises BadInput on any problem."""
     gen, pbr, face = parse_options(data)
     payload = {"Model": HY_MODEL_VERSION, "GenerateType": gen}
+    if gen in ("LowPoly", "Sketch"):
+        payload["Model"] = "3.0"      # Tencent: LowPoly and Sketch do not work on model 3.1
+    if gen == "LowPoly":
+        pt = str(data.get("polygon_type") or "triangle")
+        payload["PolygonType"] = pt if pt in ("triangle", "quadrilateral") else "triangle"
     if gen == "Normal":
         payload["EnablePBR"] = pbr
-    if face:
+    if face and gen != "LowPoly":
         payload["FaceCount"] = face
 
     prompt = data.get("prompt")
@@ -439,13 +446,16 @@ def build_payload(data):
 
     # ---- Text -> 3D ----
     if has_prompt:
-        if image or views:
+        if (image or views) and gen != "Sketch":
             raise BadInput("Send either a text description or images, not both.")
         prompt = prompt.strip()
         if len(prompt) > MAX_PROMPT_CHARS:
             raise BadInput(f"Description is too long (max {MAX_PROMPT_CHARS} characters).")
-        payload["Prompt"] = prompt
-        return payload
+       payload["Prompt"] = prompt
+        if gen != "Sketch" or not image:
+            if gen == "Sketch":
+                raise BadInput("Sketch mode needs a sketch image.")
+            return payload
 
     # ---- Image -> 3D  and  Multi-view -> 3D ----
     if not image:
@@ -685,6 +695,10 @@ def generation_cost(payload):
     """Credits for one generation: base price plus the extras the user switched on."""
     white = payload.get("GenerateType") == "Geometry" and GEN_COST_WHITE > 0
     cost = GEN_COST_WHITE if white else GEN_COST
+    if payload.get("GenerateType") == "LowPoly" and GEN_COST_LOWPOLY > 0:
+        cost = GEN_COST_LOWPOLY
+    if payload.get("GenerateType") == "Sketch" and GEN_COST_SKETCH > 0:
+        cost = GEN_COST_SKETCH
     if payload.get("EnablePBR"):
         cost += GEN_COST_PBR
     if payload.get("FaceCount"):
@@ -1080,5 +1094,7 @@ from polar_billing import register_polar
 register_polar(app, cursor, add_credits, current_user, origin_ok, auth_limited)
 from rig import register_rig
 register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy_call, pick_glb_url, friendly_tencent_error, get_supabase)
+from tools import register_tools
+register_tools(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy_call, pick_glb_url, friendly_tencent_error, get_supabase)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
