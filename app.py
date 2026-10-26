@@ -1099,6 +1099,7 @@ register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy
 from tools import register_tools
 register_tools(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy_call, pick_glb_url, friendly_tencent_error, get_supabase)
 from imagegen import register_imagegen
-register_imagegen(app, cursor, spend, refund, current_user, origin_ok)
+from gallery import register_gallery
+register_imagegen(app, cursor, spend, refund, current_user, origin_ok, register_gallery(app, cursor, current_user, origin_ok, get_supabase))
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
