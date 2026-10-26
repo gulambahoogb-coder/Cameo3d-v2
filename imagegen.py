@@ -17,6 +17,7 @@ Render environment variables:
     IMAGE_COST_2K         credits per image at 2K   (default 14)
     IMAGE_COST_4K         credits per image at 4K   (default 25)
     IMAGE_MAX_PER_HOUR    images per visitor IP per hour (default 24)
+    IMAGE_PRIVATE_EXTRA   extra credits per image when the user chooses Private (default 0 = free)
 
 Nothing new in requirements.txt (uses requests, already there).
 """
@@ -97,7 +98,7 @@ def _png(color):
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
-def register_imagegen(app, cursor, spend, refund, current_user, origin_ok):
+def register_imagegen(app, cursor, spend, refund, current_user, origin_ok, on_done=None):
     """Adds the image routes to the existing Flask app."""
 
     def costs():
@@ -188,7 +189,8 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok):
         return jsonify({
             "styles": list(STYLES.keys()), "aspects": ASPECTS, "sizes": SIZES, "poses": list(POSES.keys()),
             "max_images": MAX_IMAGES, "max_refs": MAX_REFS, "max_prompt": MAX_PROMPT,
-            "costs": costs(), "test_mode": os.environ.get("IMAGE_TEST_MODE") == "1",
+            "costs": costs(), "private_extra": _int_env("IMAGE_PRIVATE_EXTRA", 0),
+            "test_mode": os.environ.get("IMAGE_TEST_MODE") == "1",
         })
 
     @app.route("/image/generate", methods=["POST", "OPTIONS"])
@@ -214,6 +216,7 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok):
         aspect = d.get("aspect") if d.get("aspect") in ASPECTS else "1:1"
         size = d.get("size") if d.get("size") in SIZES else "1K"
         multiview = d.get("multiview") is True
+        want_private = d.get("visibility") == "private"
         try:
             count = max(1, min(MAX_IMAGES, int(d.get("count") or 1)))
         except (TypeError, ValueError):
@@ -230,7 +233,7 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok):
         if over_limit(count):
             return jsonify({"error": "Too many images this hour. Please try again later."}), 429
 
-        each = costs()[size]
+        each = costs()[size] + (_int_env("IMAGE_PRIVATE_EXTRA", 0) if want_private else 0)
         total = each * count
         if total > 0 and not spend(uid, total, f"image x{count} {size}"):
             return jsonify({"error": f"Not enough credits. This needs {total} credits."}), 402
@@ -258,6 +261,17 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok):
                 except Exception:
                     app.logger.exception("image job failed")
                     errors.append("Something went wrong. Please try again.")
+
+        meta = []
+        if on_done and images:
+            try:
+                meta = on_done(uid, prompt, style, aspect, size, images, want_private, bool(refs))
+            except Exception:
+                app.logger.exception("saving to the gallery failed")
+        for i, im in enumerate(images):
+            m = meta[i] if len(meta) > i else {}
+            im["id"] = m.get("id")
+            im["visibility"] = m.get("visibility") or ("private" if want_private else "public")
 
         failed = count - len(images)
         if failed and total > 0:
