@@ -98,6 +98,15 @@ def _png(color):
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
+def _model():
+    return os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip()
+
+
+def _sizes():
+    """The first Nano Banana (2.5) only makes 1K pictures, so only 1K is offered and charged for it."""
+    return ["1K"] if "2.5" in _model() else SIZES
+
+
 def register_imagegen(app, cursor, spend, refund, current_user, origin_ok, on_done=None):
     """Adds the image routes to the existing Flask app."""
 
@@ -187,7 +196,7 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok, on_do
     @app.get("/image/options")
     def image_options():
         return jsonify({
-            "styles": list(STYLES.keys()), "aspects": ASPECTS, "sizes": SIZES, "poses": list(POSES.keys()),
+            "styles": list(STYLES.keys()), "aspects": ASPECTS, "sizes": _sizes(), "poses": list(POSES.keys()),
             "max_images": MAX_IMAGES, "max_refs": MAX_REFS, "max_prompt": MAX_PROMPT,
             "costs": costs(), "private_extra": _int_env("IMAGE_PRIVATE_EXTRA", 0),
             "test_mode": os.environ.get("IMAGE_TEST_MODE") == "1",
@@ -214,7 +223,7 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok, on_do
         style = d.get("style") if d.get("style") in STYLES else "default"
         pose = d.get("pose") if d.get("pose") in POSES else "none"
         aspect = d.get("aspect") if d.get("aspect") in ASPECTS else "1:1"
-        size = d.get("size") if d.get("size") in SIZES else "1K"
+        size = d.get("size") if d.get("size") in _sizes() else "1K"
         multiview = d.get("multiview") is True
         want_private = d.get("visibility") == "private"
         try:
