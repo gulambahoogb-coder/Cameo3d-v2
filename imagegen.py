@@ -11,7 +11,8 @@ so the 3D generator always receives a good input image. Edit the text in the "HI
 
 Render environment variables:
     GEMINI_API_KEY        (required, unless test mode)  your key from Google AI Studio
-    GEMINI_IMAGE_MODEL    model name (default gemini-2.5-flash-image). Change it here to use another model.
+    GEMINI_IMAGE_MODEL    model name (default gemini-nano-banana-2.1 = Nano Banana 2.1). Change it here to use another model.
+    GEMINI_THINKING       optional: minimal | medium | high. 'minimal' is a little cheaper and faster (Nano Banana 2.1 thinks 'medium' by default).
     IMAGE_TEST_MODE       set to 1 = NO call to Google, returns sample pictures (free, for testing the page)
     IMAGE_COST            credits per image at 1K   (default 9)
     IMAGE_COST_2K         credits per image at 2K   (default 14)
@@ -99,7 +100,7 @@ def _png(color):
 
 
 def _model():
-    return os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip()
+    return os.environ.get("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1").strip()
 
 
 def _sizes():
@@ -160,16 +161,23 @@ def register_imagegen(app, cursor, spend, refund, current_user, origin_ok, on_do
         key = os.environ.get("GEMINI_API_KEY", "").strip()
         if not key:
             raise ImgError("The image service is not set up yet.")
-        model = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image").strip()
+        model = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1").strip()
         cfg = {"aspectRatio": aspect}
         if "2.5" not in model:                 # the first Nano Banana has no size option
             cfg["imageSize"] = size
         body = {"contents": [{"parts": parts}],
                 "generationConfig": {"responseModalities": ["TEXT", "IMAGE"], "imageConfig": cfg}}
+        think = os.environ.get("GEMINI_THINKING", "").strip().lower()
+        if think:
+            body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": think}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        hdr = {"x-goog-api-key": key, "Content-Type": "application/json"}
         try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"x-goog-api-key": key, "Content-Type": "application/json"}, json=body, timeout=100)
+            r = requests.post(url, headers=hdr, json=body, timeout=100)
+            if r.status_code == 400 and think:      # Google did not accept the thinking setting: try again without it
+                app.logger.warning("thinking level not accepted, retrying without it: %s", r.text[:300])
+                body["generationConfig"].pop("thinkingConfig", None)
+                r = requests.post(url, headers=hdr, json=body, timeout=100)
         except requests.RequestException:
             raise ImgError("The image service did not answer. Please try again.")
         if r.status_code != 200:
