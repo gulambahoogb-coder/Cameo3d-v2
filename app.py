@@ -799,7 +799,16 @@ def status(job_id):
                 if GEN_COST > 0:
                     refund_job(job_id)
                 return jsonify({"status": "FAILED", "error": "Tencent finished but returned no GLB URL."})
-
+            # START: BIG MODEL CHECK (added, nothing else changed)
+            try:
+                head = requests.get(glb_url, stream=True, timeout=30)
+                size = int(head.headers.get("Content-Length") or 0)
+                head.close()
+            except Exception:
+                size = 0
+            if size == 0 or size > 20 * 1024 * 1024:
+                return jsonify({"status": "COMPLETED", "model_url": "/model/" + job_id})
+            # END: BIG MODEL CHECK
             r = requests.get(glb_url, timeout=120)
             if not r.ok or not r.content:
                 return jsonify({"status": "FAILED", "error": "Could not download the GLB file."})
@@ -827,7 +836,45 @@ def status(job_id):
     except Exception as exc:
         app.logger.exception("status failed")
         return jsonify({"error": f"Server error: {exc}"}), 500
+        # START: BIG MODEL DOWNLOAD ROUTE (streams the file, no base64, low memory)
+from flask import stream_with_context
 
+
+@app.route("/model/<job_id>", methods=["GET", "OPTIONS"])
+def model_file(job_id):
+    if request.method == "OPTIONS":
+        return ("", 204)
+    if not origin_ok():
+        return jsonify({"error": "Forbidden."}), 403
+    try:
+        resp = hy_call("QueryHunyuanTo3DProJob", {"JobId": job_id})
+        if str(resp.get("Status") or "").upper() != "DONE":
+            return jsonify({"error": "Model is not ready."}), 409
+        glb_url = pick_glb_url(resp.get("ResultFile3Ds"))
+        if not glb_url:
+            return jsonify({"error": "No model file found."}), 404
+        r = requests.get(glb_url, stream=True, timeout=120)
+        if not r.ok:
+            return jsonify({"error": "Could not download the model file."}), 502
+        headers = {}
+        if r.headers.get("Content-Length"):
+            headers["Content-Length"] = r.headers["Content-Length"]
+
+        def gen():
+            try:
+                for chunk in r.iter_content(chunk_size=256 * 1024):
+                    if chunk:
+                        yield chunk
+            finally:
+                r.close()
+
+        return Response(stream_with_context(gen()), content_type="model/gltf-binary", headers=headers)
+    except TencentCloudSDKException as exc:
+        return jsonify({"error": friendly_tencent_error(exc)}), 502
+    except Exception as exc:
+        app.logger.exception("model_file failed")
+        return jsonify({"error": f"Server error: {exc}"}), 500
+# END: BIG MODEL DOWNLOAD ROUTE
 
 # ---------------------------------------------------------------
 # ROUTES: FORMAT CONVERSION  (each non-GLB download costs credits; GLB is free)
