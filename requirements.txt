@@ -1,3 +1,4 @@
+# START: REQUIREMENTS (R2 support added)
 flask
 gunicorn
 requests
@@ -5,3 +6,5 @@ psycopg2-binary
 PyJWT
 supabase
 tencentcloud-sdk-python==3.1.185
+boto3
+# END: REQUIREMENTS
