@@ -281,7 +281,30 @@ def get_supabase():
     from supabase import create_client
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
 
+# START: R2 DOWNLOAD LINK HELPER (makes a 60 second link for a file in cameo-models)
+import boto3
+from botocore.config import Config
 
+
+def r2_signed_url(path, seconds=60):
+    client = boto3.client(
+        "s3",
+        endpoint_url="https://%s.r2.cloudflarestorage.com" % os.environ["R2_ACCOUNT_ID"],
+        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        region_name="auto",
+        config=Config(signature_version="s3v4"),
+    )
+    return client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": os.environ["R2_BUCKET"],
+            "Key": path,
+            "ResponseContentDisposition": 'attachment; filename="%s"' % path.split("/")[-1],
+        },
+        ExpiresIn=seconds,
+    )
+# END: R2 DOWNLOAD LINK HELPER
 def _save_generation(job_id, content):
     """Background: copy a finished model into the private 'generations' bucket. Never affects the user."""
     try:
@@ -655,8 +678,9 @@ def library_download(mid):
         )
     # If the link cannot be made, the credits are given back below.
     try:
-        res = get_supabase().storage.from_("models").create_signed_url(path, 60)
-        url = res.get("signedURL") or res.get("signedUrl")
+               # START: R2 DOWNLOAD LINK (replaces the Supabase link)
+        url = r2_signed_url(path)
+        # END: R2 DOWNLOAD LINK
     except Exception:
         app.logger.exception("signed url failed model=%s", mid)
         url = None
