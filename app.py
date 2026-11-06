@@ -1169,6 +1169,10 @@ from rig import register_rig
 register_rig(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy_call, pick_glb_url, friendly_tencent_error, get_supabase)
 from tools import register_tools
 register_tools(app, cursor, spend, refund, refund_job, current_user, origin_ok, hy_call, pick_glb_url, friendly_tencent_error, get_supabase)
+# START: ADMIN MODELS FORM PAGE
+from admin_models import register_models_admin
+register_models_admin(app, cursor)
+# END: ADMIN MODELS FORM PAGE
 from imagegen import register_imagegen
 from gallery import register_gallery
 register_imagegen(app, cursor, spend, refund, current_user, origin_ok, register_gallery(app, cursor, current_user, origin_ok, get_supabase))
