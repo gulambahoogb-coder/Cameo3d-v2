@@ -293,9 +293,7 @@ def r2_signed_url(path, seconds=60):
         aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
-                # START: R2 CHECKSUM FIX (stops boto3 adding fields Cloudflare rejects)
-        config=Config(signature_version="s3v4", request_checksum_calculation="when_required", response_checksum_validation="when_required"),
-        # END: R2 CHECKSUM FIX
+        config=Config(signature_version="s3v4"),
     )
     return client.generate_presigned_url(
         "get_object",
