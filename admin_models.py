@@ -43,7 +43,9 @@ def ensure_model_columns(cur):
     """Adds the extra columns the library needs. Safe to call many times; app.py uses it too."""
     if _columns_ready[0]:
         return
-    for col in ("viewer_url text", "slug text", "tags text", "white_url text", "thumb_mode text"):
+    # START: EXTRA COLUMNS (home_row added)
+    for col in ("viewer_url text", "slug text", "tags text", "white_url text", "thumb_mode text", "home_row integer"):
+# END: EXTRA COLUMNS (home_row added)
         cur.execute("alter table models add column if not exists " + col)
     _columns_ready[0] = True
 
@@ -144,6 +146,14 @@ def register_models_admin(app, cursor):
         tags = str(d.get("tags", "")).strip()[:300]
         description = str(d.get("description", "")).strip()[:1000]
         mode = "model" if d.get("mode") == "model" else "image"
+                # START: HOME ROW (0 = not on homepage, 1 / 2 / 3 = row)
+        try:
+            home_row = int(d.get("home_row") or 0)
+        except (TypeError, ValueError):
+            home_row = 0
+        if home_row not in (0, 1, 2, 3):
+            home_row = 0
+        # END: HOME ROW
         try:
             price = int(d.get("price"))
         except (TypeError, ValueError):
@@ -186,34 +196,49 @@ def register_models_admin(app, cursor):
                 return jsonify({"error": "Picture style needs a thumbnail picture. Choose one in box 1."}), 400
             white_url = PREVIEW_BASE + "/" + keys["white"] if keys["white"] else (row[4] if row else None)
             file_path = keys["full"] or row[3]
+                        # START: SAVE (update or insert, now with home_row)
             if row:
                 cur.execute(
                     "update models set title=%s, category=%s, price_credits=%s, tags=%s, description=%s,"
-                    " preview_url=%s, viewer_url=%s, file_path=%s, white_url=%s, thumb_mode=%s where id=%s",
-                    (title, category, price, tags, description, preview_url, viewer_url, file_path, white_url, mode, row[0]),
+                    " preview_url=%s, viewer_url=%s, file_path=%s, white_url=%s, thumb_mode=%s, home_row=%s where id=%s",
+                    (title, category, price, tags, description, preview_url, viewer_url, file_path, white_url, mode, home_row, row[0]),
                 )
                 mid = row[0]
             else:
                 cur.execute(
-                    "insert into models(title,slug,category,price_credits,tags,description,preview_url,viewer_url,file_path,white_url,thumb_mode)"
-                    " values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id",
-                    (title, slug, category, price, tags, description, preview_url, viewer_url, file_path, white_url, mode),
+                    "insert into models(title,slug,category,price_credits,tags,description,preview_url,viewer_url,file_path,white_url,thumb_mode,home_row)"
+                    " values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id",
+                    (title, slug, category, price, tags, description, preview_url, viewer_url, file_path, white_url, mode, home_row),
                 )
                 mid = cur.fetchone()[0]
+            # END: SAVE (update or insert, now with home_row)
         return jsonify({"ok": True, "id": mid})
 
+        # START: ADMIN LIST (now sends home_row) + PUBLIC HOMEPAGE LIST
     @app.get("/admin/models/list")
     def admin_models_list():
         if not key_ok():
             return jsonify({"error": "Wrong admin key."}), 403
         with cursor() as cur:
             ensure_model_columns(cur)
-            cur.execute("select id,title,slug,category,price_credits,tags,description,thumb_mode from models order by id desc")
+            cur.execute("select id,title,slug,category,price_credits,tags,description,thumb_mode,home_row from models order by id desc")
             rows = cur.fetchall()
         return jsonify([
             {"id": r[0], "title": r[1], "slug": r[2], "category": r[3], "price": r[4],
-             "tags": r[5] or "", "description": r[6] or "", "mode": r[7] or "image"} for r in rows
+             "tags": r[5] or "", "description": r[6] or "", "mode": r[7] or "image", "home_row": r[8] or 0} for r in rows
         ])
+
+    # Public: only the models you marked for the homepage (row 1, 2 or 3)
+    @app.get("/library/home")
+    def library_home():
+        with cursor() as cur:
+            ensure_model_columns(cur)
+            cur.execute("select id,title,preview_url,price_credits,category,viewer_url,white_url,thumb_mode,home_row from models where home_row in (1,2,3) order by id desc")
+            rows = cur.fetchall()
+        return jsonify([{"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4],
+                         "viewer": r[5] or r[2], "white": r[6] or "", "mode": r[7] or "",
+                         "home_row": r[8]} for r in rows])
+    # END: ADMIN LIST (now sends home_row) + PUBLIC HOMEPAGE LIST
 
     # Removes the library row and the model's files in Cloudflare.
     @app.post("/admin/models/delete")
@@ -310,7 +335,15 @@ td.act{white-space:nowrap;text-align:right}
     <option value="image">Picture only (heavy files): picture, white picture on hover</option>
     <option value="model">Rotating 3D model (light files only): the viewer .glb turns in the card</option>
   </select>
-
+  <!-- START: HOMEPAGE ROW DROPDOWN -->
+  <label for="home_row">Show on homepage <span class="hint">(bottom of the homepage, sliding rows)</span></label>
+  <select id="home_row">
+    <option value="0">Not on homepage</option>
+    <option value="1">Row 1 (slides left)</option>
+    <option value="2">Row 2 (slides right)</option>
+    <option value="3">Row 3 (slides left)</option>
+  </select>
+<!-- END: HOMEPAGE ROW DROPDOWN -->
   <label for="category">Category</label>
   <input id="category" list="cats" placeholder="Furniture">
   <datalist id="cats"><option>Characters</option><option>Props</option><option>Vehicles</option><option>Furniture</option></datalist>
@@ -394,7 +427,10 @@ $("slug").addEventListener("input", () => { $("slug").dataset.touched = "1"; });
 function clearForm(){
   ["title","slug","tags","description","category","thumb","white","viewer","full"].forEach(i => { $(i).value = ""; });
   $("price").value = "0";
-  $("mode").value = "image";
+  // START: CLEAR HOME ROW TOO
+$("mode").value = "image";
+$("home_row").value = "0";
+// END: CLEAR HOME ROW TOO
   delete $("slug").dataset.touched;
   $("mode_note").textContent = "";
 }
@@ -411,7 +447,9 @@ $("go").onclick = async () => {
     if(isNew && mode === "image" && !thumb) throw new Error("Picture style needs a thumbnail picture (box 1).");
     for(const f of [thumb, white, viewer, full]) if(f && !extOf(f)) throw new Error("Every file needs an ending like .glb or .webp.");
     $("go").disabled = true;
-    const body = {slug, title, mode, category:$("category").value, price:$("price").value, tags:$("tags").value, description:$("description").value};
+    // START: SEND HOME ROW WITH THE FORM
+const body = {slug, title, mode, home_row:$("home_row").value, category:$("category").value, price:$("price").value, tags:$("tags").value, description:$("description").value};
+// END: SEND HOME ROW WITH THE FORM
     const manual = [];
     if(thumb){ body.thumb_key = await up("thumb", thumb, slug, extOf(thumb), "Thumbnail"); if(thumb.size > BIG) manual.push("cameo-previews/" + body.thumb_key); }
     if(white){ body.white_key = await up("white", white, slug, extOf(white), "White picture"); if(white.size > BIG) manual.push("cameo-previews/" + body.white_key); }
@@ -445,7 +483,9 @@ async function loadList(){
           clearForm();
           $("title").value = m.title; $("slug").value = m.slug; $("slug").dataset.touched = "1";
           $("price").value = m.price; $("category").value = m.category || ""; $("mode").value = m.mode;
-          $("tags").value = m.tags; $("description").value = m.description;
+          // START: EDIT FILLS HOME ROW
+$("tags").value = m.tags; $("description").value = m.description; $("home_row").value = String(m.home_row || 0);
+// END: EDIT FILLS HOME ROW
           $("mode_note").textContent = "Editing: " + m.title;
           say("Change what you want, then click Save model. File boxes can stay empty.");
           window.scrollTo({top:0, behavior:"smooth"});
