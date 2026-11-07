@@ -1,10 +1,13 @@
-# START: ADMIN MODELS PAGE (add library models from a form; files go straight to Cloudflare R2)
+# START: ADMIN MODELS PAGE v2 (add / edit / delete library models from one form page)
 #
 # What this file does:
 #   - Opens a form page at  /admin/models  on your Render service
-#   - You pick the files, fill the boxes, click Save. Done.
-#   - The page uploads the 3 files directly to Cloudflare R2 and adds the row in Supabase.
-#   - It also creates the new columns (viewer_url, slug, tags) by itself the first time.
+#   - ADD:    pick the files, fill the boxes, click Save. The server puts the files in Cloudflare R2.
+#   - EDIT:   click Edit in the list, change the text (or pick new files), click Save.
+#   - DELETE: click Delete in the list. It removes the library row AND its files in Cloudflare.
+#   - Uploads go through your Render server, so there is NO Cloudflare CORS setup needed.
+#   - Files bigger than about 80 MB: the page tells you the exact name to upload by hand in Cloudflare.
+#   - It creates the new columns (viewer_url, slug, tags) by itself the first time.
 #
 # Needs these Render variables (you already have them):
 #   ADMIN_KEY, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
@@ -18,6 +21,7 @@ import hmac
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from flask import jsonify, request, Response
 
 PREVIEW_BUCKET = os.environ.get("R2_PREVIEW_BUCKET", "cameo-previews")
@@ -25,6 +29,7 @@ PREVIEW_BASE = os.environ.get(
     "R2_PREVIEW_BASE_URL", "https://pub-5b01e64ba08c4a6eafb3de4a956cd45a.r2.dev"
 ).rstrip("/")
 
+MAX_UPLOAD = 120 * 1024 * 1024                        # biggest file the form accepts
 SLUG_OK = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}$")   # short name: lowercase letters, numbers, dashes
 EXT_OK = re.compile(r"^[a-z0-9]{2,5}$")              # file ending like glb, stl, webp
 _columns_ready = [False]
@@ -37,10 +42,31 @@ def r2_client():
         aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
-                # START: R2 CHECKSUM FIX (stops boto3 adding fields Cloudflare rejects)
-        config=Config(signature_version="s3v4", request_checksum_calculation="when_required", response_checksum_validation="when_required"),
-        # END: R2 CHECKSUM FIX
+        config=Config(
+            signature_version="s3v4",
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        ),
     )
+
+
+def target(slug, kind, ext):
+    """Where each file lives: which bucket and which path."""
+    if kind == "full":
+        return os.environ["R2_BUCKET"], "%s.%s" % (slug, ext)
+    if kind == "thumb":
+        return PREVIEW_BUCKET, "thumbs/%s.%s" % (slug, ext)
+    if kind == "viewer":
+        return PREVIEW_BUCKET, "viewer/%s.glb" % slug
+    return None, None
+
+
+def key_matches(slug, kind, key):
+    """True if a path looks exactly like what this form would have made."""
+    if kind == "viewer":
+        return key == "viewer/%s.glb" % slug
+    prefix = ("thumbs/%s." % slug) if kind == "thumb" else ("%s." % slug)
+    return key.startswith(prefix) and EXT_OK.match(key[len(prefix):]) is not None
 
 
 def register_models_admin(app, cursor):
@@ -56,41 +82,45 @@ def register_models_admin(app, cursor):
         cur.execute("alter table models add column if not exists tags text")
         _columns_ready[0] = True
 
+    # Lets the upload route accept big files (the rest of the site keeps its smaller limit).
+    @app.before_request
+    def admin_models_upload_limit():
+        if request.path == "/admin/models/upload":
+            try:
+                request.max_content_length = MAX_UPLOAD
+            except Exception:
+                pass
+
     @app.get("/admin/models")
     def admin_models_page():
         return Response(PAGE_HTML, mimetype="text/html")
 
-    # Step 1 of saving: the page asks for permission slips (signed upload links) for each file.
-    @app.post("/admin/models/sign")
-    def admin_models_sign():
+    # Receives one file from the page and puts it into Cloudflare R2.
+    @app.post("/admin/models/upload")
+    def admin_models_upload():
         if not key_ok():
             return jsonify({"error": "Wrong admin key."}), 403
-        d = request.get_json(silent=True) or {}
-        slug = str(d.get("slug", ""))
-        if not SLUG_OK.match(slug):
-            return jsonify({"error": "URL name can only use a-z, 0-9 and dashes."}), 400
-        out = {}
-        for item in d.get("files") or []:
-            kind = item.get("kind")
-            ext = str(item.get("ext", "")).lower().lstrip(".")
-            ctype = str(item.get("type") or "application/octet-stream")[:100]
-            if kind not in ("thumb", "viewer", "full") or not EXT_OK.match(ext):
-                return jsonify({"error": "Bad file type."}), 400
-            if kind == "full":
-                bucket, key = os.environ["R2_BUCKET"], "%s.%s" % (slug, ext)
-            elif kind == "thumb":
-                bucket, key = PREVIEW_BUCKET, "thumbs/%s.%s" % (slug, ext)
-            else:
-                bucket, key = PREVIEW_BUCKET, "viewer/%s.glb" % slug
-            url = r2_client().generate_presigned_url(
-                "put_object",
-                Params={"Bucket": bucket, "Key": key, "ContentType": ctype},
-                ExpiresIn=1800,
-            )
-            out[kind] = {"url": url, "key": key}
-        return jsonify(out)
+        slug = request.form.get("slug", "")
+        kind = request.form.get("kind", "")
+        ext = request.form.get("ext", "").lower().lstrip(".")
+        f = request.files.get("file")
+        if not SLUG_OK.match(slug) or kind not in ("thumb", "viewer", "full") or not EXT_OK.match(ext) or not f:
+            return jsonify({"error": "Bad upload request."}), 400
+        bucket, key = target(slug, kind, ext)
+        if kind == "viewer":
+            ctype = "model/gltf-binary"
+        elif kind == "thumb":
+            ctype = f.mimetype or "image/webp"
+        else:
+            ctype = "application/octet-stream"
+        try:
+            r2_client().upload_fileobj(f.stream, bucket, key, ExtraArgs={"ContentType": ctype})
+        except Exception as exc:
+            app.logger.exception("r2 upload failed %s/%s", bucket, key)
+            return jsonify({"error": "Cloudflare upload failed: %s" % str(exc)[:160]}), 502
+        return jsonify({"key": key})
 
-    # Step 2 of saving: after the files are uploaded, write the row in the models table.
+    # After the files are in R2, write (or update) the row in the models table.
     @app.post("/admin/models/save")
     def admin_models_save():
         if not key_ok():
@@ -105,32 +135,47 @@ def register_models_admin(app, cursor):
             price = int(d.get("price"))
         except (TypeError, ValueError):
             return jsonify({"error": "Credits must be a number (0 = free)."}), 400
-        thumb_key = str(d.get("thumb_key", ""))
-        viewer_key = str(d.get("viewer_key", ""))
-        full_key = str(d.get("full_key", ""))
         if not SLUG_OK.match(slug) or not title or not category or price < 0 or price > 100000:
             return jsonify({"error": "Title, URL name, category and credits are needed."}), 400
-        if not (thumb_key.startswith("thumbs/" + slug + ".") and viewer_key == "viewer/%s.glb" % slug
-                and full_key.startswith(slug + ".")):
-            return jsonify({"error": "File names do not match the URL name."}), 400
-        preview_url = PREVIEW_BASE + "/" + thumb_key
-        viewer_url = PREVIEW_BASE + "/" + viewer_key
+
+        keys = {
+            "thumb": str(d.get("thumb_key") or ""),
+            "viewer": str(d.get("viewer_key") or ""),
+            "full": str(d.get("full_key") or ""),
+        }
+        client = r2_client()
+        for kind, key in keys.items():
+            if not key:
+                continue
+            if not key_matches(slug, kind, key):
+                return jsonify({"error": "File names do not match the URL name."}), 400
+            bucket = os.environ["R2_BUCKET"] if kind == "full" else PREVIEW_BUCKET
+            try:
+                client.head_object(Bucket=bucket, Key=key)
+            except ClientError:
+                return jsonify({"error": "File not found in Cloudflare: %s/%s . Upload it there with exactly this name, then click Save again." % (bucket, key)}), 400
+
         with cursor() as cur:
             ensure_columns(cur)
-            cur.execute("select id from models where slug=%s", (slug,))
+            cur.execute("select id,preview_url,viewer_url,file_path from models where slug=%s", (slug,))
             row = cur.fetchone()
+            if not row and not all(keys.values()):
+                return jsonify({"error": "A new model needs all 3 files."}), 400
+            preview_url = PREVIEW_BASE + "/" + keys["thumb"] if keys["thumb"] else row[1]
+            viewer_url = PREVIEW_BASE + "/" + keys["viewer"] if keys["viewer"] else row[2]
+            file_path = keys["full"] or row[3]
             if row:
                 cur.execute(
                     "update models set title=%s, category=%s, price_credits=%s, tags=%s, description=%s,"
                     " preview_url=%s, viewer_url=%s, file_path=%s where id=%s",
-                    (title, category, price, tags, description, preview_url, viewer_url, full_key, row[0]),
+                    (title, category, price, tags, description, preview_url, viewer_url, file_path, row[0]),
                 )
                 mid = row[0]
             else:
                 cur.execute(
                     "insert into models(title,slug,category,price_credits,tags,description,preview_url,viewer_url,file_path)"
                     " values(%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id",
-                    (title, slug, category, price, tags, description, preview_url, viewer_url, full_key),
+                    (title, slug, category, price, tags, description, preview_url, viewer_url, file_path),
                 )
                 mid = cur.fetchone()[0]
         return jsonify({"ok": True, "id": mid})
@@ -141,11 +186,14 @@ def register_models_admin(app, cursor):
             return jsonify({"error": "Wrong admin key."}), 403
         with cursor() as cur:
             ensure_columns(cur)
-            cur.execute("select id,title,slug,category,price_credits from models order by id desc")
+            cur.execute("select id,title,slug,category,price_credits,tags,description from models order by id desc")
             rows = cur.fetchall()
-        return jsonify([{"id": r[0], "title": r[1], "slug": r[2], "category": r[3], "price": r[4]} for r in rows])
+        return jsonify([
+            {"id": r[0], "title": r[1], "slug": r[2], "category": r[3], "price": r[4],
+             "tags": r[5] or "", "description": r[6] or ""} for r in rows
+        ])
 
-    # Removes only the library row. The files stay in R2 (delete them in Cloudflare if you want).
+    # Removes the library row and the model's files in Cloudflare.
     @app.post("/admin/models/delete")
     def admin_models_delete():
         if not key_ok():
@@ -155,55 +203,78 @@ def register_models_admin(app, cursor):
         except (TypeError, ValueError):
             return jsonify({"error": "Bad id."}), 400
         with cursor() as cur:
+            ensure_columns(cur)
+            cur.execute("select preview_url,viewer_url,file_path from models where id=%s", (mid,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Model not found."}), 404
+            cur.execute("delete from downloads where model_id=%s", (mid,))
             cur.execute("delete from models where id=%s", (mid,))
+        client = r2_client()
+        base = PREVIEW_BASE + "/"
+        jobs = []
+        for url in (row[0], row[1]):
+            if url and url.startswith(base):
+                jobs.append((PREVIEW_BUCKET, url[len(base):]))
+        if row[2]:
+            jobs.append((os.environ["R2_BUCKET"], row[2]))
+        for bucket, key in jobs:
+            try:
+                client.delete_object(Bucket=bucket, Key=key)
+            except Exception:
+                app.logger.exception("r2 delete failed %s/%s", bucket, key)
         return jsonify({"ok": True})
 
 
 PAGE_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cameo3D - Add model</title>
+<title>Cameo3D - Models admin</title>
 <style>
 :root{--bg:#101012;--card:#19191d;--line:#2c2c33;--text:#f2f2f4;--dim:#9a9aa6;--lime:#c9f23b;--pink:#f58cb4}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Arial,sans-serif}
-main{max-width:760px;margin:0 auto;padding:28px 18px 80px}
+main{max-width:780px;margin:0 auto;padding:28px 18px 80px}
 h1{font-size:28px;margin:0 0 4px}
 h2{font-size:19px;margin:34px 0 10px}
 p.sub{color:var(--dim);margin:0 0 22px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
 label{display:block;font-weight:600;margin:14px 0 5px}
 .hint{font-weight:400;color:var(--dim);font-size:14px}
-input,select,textarea{width:100%;background:#0e0e10;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit}
-input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--lime);outline-offset:1px}
+input,textarea{width:100%;background:#0e0e10;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px 12px;font:inherit}
+input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--lime);outline-offset:1px}
 input[type=file]{padding:9px}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:560px){.row{grid-template-columns:1fr}}
 button{font:inherit;font-weight:700;border:0;border-radius:10px;padding:12px 20px;cursor:pointer;background:var(--lime);color:#14160a}
 button:disabled{opacity:.5;cursor:wait}
-button.small{padding:6px 12px;font-size:14px;background:#2a2a31;color:var(--text)}
+button.small{padding:6px 12px;font-size:14px;background:#2a2a31;color:var(--text);margin-right:6px}
+button.danger{background:#4a2233;color:var(--pink)}
 #status{margin-top:14px;min-height:24px;font-weight:600}
 #status.err{color:var(--pink)}
+#mode{color:var(--lime);font-weight:600;margin:0 0 6px;min-height:24px}
 table{width:100%;border-collapse:collapse}
 td,th{text-align:left;padding:9px 6px;border-bottom:1px solid var(--line);font-size:15px}
 th{color:var(--dim);font-weight:600}
-pre{background:#0e0e10;border:1px solid var(--line);border-radius:9px;padding:12px;overflow:auto;font-size:13px}
+td.act{white-space:nowrap;text-align:right}
 </style></head>
 <body><main>
-<!-- START: ADMIN FORM - ADD MODEL -->
-<h1>Add a model</h1>
-<p class="sub">Fill the boxes, choose 3 files, click Save. The model appears in the library.</p>
+<!-- START: ADMIN FORM - ADD OR EDIT MODEL -->
+<h1>Models admin</h1>
+<p class="sub">Add a model, or click Edit in the list below to change one.</p>
 
 <div class="card">
   <label for="key">Admin key <span class="hint">(the ADMIN_KEY from Render)</span></label>
   <input id="key" type="password" autocomplete="off">
+
+  <p id="mode"></p>
 
   <label for="title">Title</label>
   <input id="title" maxlength="120" placeholder="Modern chair">
 
   <div class="row">
     <div>
-      <label for="slug">URL name <span class="hint">(made from the title, you can change it)</span></label>
+      <label for="slug">URL name <span class="hint">(made from the title; the same name edits that model)</span></label>
       <input id="slug" maxlength="60" placeholder="modern-chair">
     </div>
     <div>
@@ -228,13 +299,14 @@ pre{background:#0e0e10;border:1px solid var(--line);border-radius:9px;padding:12
   <label for="viewer">2. Viewer model <span class="hint">(.glb, opens when someone clicks the card; leave empty to use the full file when it is a .glb)</span></label>
   <input id="viewer" type="file" accept=".glb">
 
-  <label for="full">3. Full model for download <span class="hint">(private; .glb, .stl, .zip, .3mf)</span></label>
+  <label for="full">3. Full model for download <span class="hint">(private; .glb, .stl, .zip, .3mf, .fbx)</span></label>
   <input id="full" type="file">
 
-  <p style="margin:20px 0 0"><button id="go">Save model</button></p>
+  <p class="hint" style="margin:14px 0 0">When editing, leave the file boxes empty to keep the current files.</p>
+  <p style="margin:16px 0 0"><button id="go">Save model</button> <button class="small" id="clear" type="button">Clear form</button></p>
   <div id="status"></div>
 </div>
-<!-- END: ADMIN FORM - ADD MODEL -->
+<!-- END: ADMIN FORM - ADD OR EDIT MODEL -->
 
 <!-- START: ADMIN LIST - MODELS IN LIBRARY -->
 <h2>Models in the library</h2>
@@ -244,21 +316,15 @@ pre{background:#0e0e10;border:1px solid var(--line);border-radius:9px;padding:12
 </div>
 <!-- END: ADMIN LIST - MODELS IN LIBRARY -->
 
-<!-- START: ADMIN CORS BOX (one-time setup in Cloudflare) -->
-<h2>One-time setup in Cloudflare</h2>
-<div class="card">
-  <p style="margin:0 0 10px">Uploads go straight from this page to Cloudflare, so both buckets must allow this page. Add this rule in <b>cameo-models</b> and also in <b>cameo-previews</b> (Bucket, Settings, CORS policy, Add). Keep the rule that is already in cameo-previews and add this one next to it.</p>
-  <pre id="cors"></pre>
-</div>
-<!-- END: ADMIN CORS BOX -->
-
 <script>
 // START: ADMIN PAGE SCRIPT
 const $ = id => document.getElementById(id);
-$("cors").textContent = JSON.stringify([{AllowedOrigins:[location.origin],AllowedMethods:["PUT"],AllowedHeaders:["*"],MaxAgeSeconds:3600}], null, 2);
+const BIG = 80 * 1024 * 1024;       // bigger files are uploaded by hand in Cloudflare
+let known = new Set();              // URL names that already exist
 
 function say(text, bad){ const s=$("status"); s.textContent=text; s.className = bad ? "err" : ""; }
 function extOf(f){ const m=/\.([A-Za-z0-9]+)$/.exec(f.name); return m ? m[1].toLowerCase() : ""; }
+function keyFor(kind, slug, ext){ return kind==="thumb" ? "thumbs/"+slug+"."+ext : kind==="viewer" ? "viewer/"+slug+".glb" : slug+"."+ext; }
 
 async function api(path, method, body){
   const r = await fetch(path, {method, headers:{"Content-Type":"application/json","X-Admin-Key":$("key").value.trim()}, body: body ? JSON.stringify(body) : undefined});
@@ -267,15 +333,23 @@ async function api(path, method, body){
   return j;
 }
 
-function put(url, file, type, label){
+// Sends one file to the server. Files over 80 MB are skipped here and must be put in Cloudflare by hand.
+function up(kind, file, slug, ext, label){
+  if(file.size > BIG) return Promise.resolve(keyFor(kind, slug, ext));
   return new Promise((ok, fail) => {
+    const fd = new FormData();
+    fd.append("slug", slug); fd.append("kind", kind); fd.append("ext", ext); fd.append("file", file);
     const x = new XMLHttpRequest();
-    x.open("PUT", url);
-    x.setRequestHeader("Content-Type", type);
+    x.open("POST", "/admin/models/upload");
+    x.setRequestHeader("X-Admin-Key", $("key").value.trim());
     x.upload.onprogress = e => { if(e.lengthComputable) say(label + ": " + Math.round(e.loaded/e.total*100) + "%"); };
-    x.onload = () => x.status < 300 ? ok() : fail(new Error(label + " upload failed (" + x.status + ")."));
-    x.onerror = () => fail(new Error(label + " was blocked. Add the CORS rule from the bottom of this page to both buckets."));
-    x.send(file);
+    x.onload = () => {
+      let j = {}; try{ j = JSON.parse(x.responseText); }catch(e){}
+      if(x.status < 300) ok(j.key);
+      else fail(new Error(j.error || (x.status === 413 ? label + " is too large for the form." : label + " upload failed (" + x.status + ").")));
+    };
+    x.onerror = () => fail(new Error(label + ": no answer from the server. Wait a minute (it may be waking up) and try again."));
+    x.send(fd);
   });
 }
 
@@ -284,32 +358,35 @@ $("title").addEventListener("input", () => {
 });
 $("slug").addEventListener("input", () => { $("slug").dataset.touched = "1"; });
 
+function clearForm(){
+  ["title","slug","tags","description","category","thumb","viewer","full"].forEach(i => { $(i).value = ""; });
+  $("price").value = "0";
+  delete $("slug").dataset.touched;
+  $("mode").textContent = "";
+}
+$("clear").onclick = () => { clearForm(); say(""); };
+
 $("go").onclick = async () => {
   try{
-    const thumb=$("thumb").files[0], full=$("full").files[0], viewer=$("viewer").files[0];
     const slug=$("slug").value.trim(), title=$("title").value.trim();
+    const thumb=$("thumb").files[0], viewer=$("viewer").files[0], full=$("full").files[0];
     if(!title || !slug) throw new Error("Write a title first.");
     if(!$("category").value.trim()) throw new Error("Write a category.");
-    if(!thumb || !full) throw new Error("Choose the thumbnail picture and the full model file.");
-    const fullExt=extOf(full), thumbExt=extOf(thumb);
-    if(!viewer && fullExt !== "glb") throw new Error("The viewer needs a .glb file. Choose one in box 2.");
-    const viewerFile = viewer || full;
-    const thumbType = thumb.type || "image/webp";
+    const isNew = !known.has(slug);
+    if(isNew && (!thumb || !full)) throw new Error("A new model needs the thumbnail picture and the full model file.");
+    for(const f of [thumb, viewer, full]) if(f && !extOf(f)) throw new Error("Every file needs an ending like .glb or .webp.");
     $("go").disabled = true;
-    say("Preparing upload...");
-    const signed = await api("/admin/models/sign", "POST", {slug, files:[
-      {kind:"thumb", ext:thumbExt, type:thumbType},
-      {kind:"viewer", ext:"glb", type:"model/gltf-binary"},
-      {kind:"full", ext:fullExt, type:"application/octet-stream"}]});
-    await put(signed.thumb.url, thumb, thumbType, "Thumbnail");
-    await put(signed.viewer.url, viewerFile, "model/gltf-binary", "Viewer model");
-    await put(signed.full.url, full, "application/octet-stream", "Full model");
-    await api("/admin/models/save", "POST", {slug, title, category:$("category").value, price:$("price").value,
-      tags:$("tags").value, description:$("description").value,
-      thumb_key:signed.thumb.key, viewer_key:signed.viewer.key, full_key:signed.full.key});
+    const body = {slug, title, category:$("category").value, price:$("price").value, tags:$("tags").value, description:$("description").value};
+    const manual = [];
+    if(thumb){ body.thumb_key = await up("thumb", thumb, slug, extOf(thumb), "Thumbnail"); if(thumb.size > BIG) manual.push("cameo-previews/" + body.thumb_key); }
+    const viewerFile = viewer || (full && extOf(full) === "glb" ? full : null);
+    if(viewerFile){ body.viewer_key = await up("viewer", viewerFile, slug, "glb", "Viewer model"); if(viewerFile.size > BIG) manual.push("cameo-previews/" + body.viewer_key); }
+    else if(isNew) throw new Error("The viewer needs a .glb file. Choose one in box 2.");
+    if(full){ body.full_key = await up("full", full, slug, extOf(full), "Full model"); if(full.size > BIG) manual.push("cameo-models/" + body.full_key); }
+    if(manual.length) say("Big file: upload it in Cloudflare with this exact name (bucket/name): " + manual.join("  and  ") + " . Then click Save again.", true);
+    await api("/admin/models/save", "POST", body);
     say("Saved. The model is in the library.");
-    ["title","slug","tags","description","thumb","viewer","full"].forEach(i => { $(i).value = ""; });
-    delete $("slug").dataset.touched;
+    clearForm();
     loadList();
   }catch(e){ say(e.message, true); }
   finally{ $("go").disabled = false; }
@@ -318,17 +395,31 @@ $("go").onclick = async () => {
 async function loadList(){
   try{
     const rows = await api("/admin/models/list", "GET");
+    known = new Set(rows.map(m => m.slug).filter(Boolean));
     const body = $("rows"); body.innerHTML = "";
     rows.forEach(m => {
       const tr = document.createElement("tr");
       [m.title, m.category || "", m.price === 0 ? "Free" : String(m.price)].forEach(t => {
         const td = document.createElement("td"); td.textContent = t; tr.appendChild(td);
       });
-      const td = document.createElement("td");
-      const b = document.createElement("button"); b.className = "small"; b.textContent = "Delete";
+      const td = document.createElement("td"); td.className = "act";
+      if(m.slug){
+        const e = document.createElement("button"); e.className = "small"; e.textContent = "Edit";
+        e.onclick = () => {
+          clearForm();
+          $("title").value = m.title; $("slug").value = m.slug; $("slug").dataset.touched = "1";
+          $("price").value = m.price; $("category").value = m.category || "";
+          $("tags").value = m.tags; $("description").value = m.description;
+          $("mode").textContent = "Editing: " + m.title;
+          say("Change what you want, then click Save model. File boxes can stay empty.");
+          window.scrollTo({top:0, behavior:"smooth"});
+        };
+        td.appendChild(e);
+      }
+      const b = document.createElement("button"); b.className = "small danger"; b.textContent = "Delete";
       b.onclick = async () => {
-        if(!confirm("Remove " + m.title + " from the library? The files stay in Cloudflare.")) return;
-        try{ await api("/admin/models/delete", "POST", {id:m.id}); loadList(); }catch(e){ say(e.message, true); }
+        if(!confirm("Delete " + m.title + "? This removes it from the library and deletes its files in Cloudflare.")) return;
+        try{ await api("/admin/models/delete", "POST", {id:m.id}); loadList(); }catch(err){ say(err.message, true); }
       };
       td.appendChild(b); tr.appendChild(td); body.appendChild(tr);
     });
@@ -338,4 +429,4 @@ $("refresh").onclick = loadList;
 // END: ADMIN PAGE SCRIPT
 </script>
 </main></body></html>"""
-# END: ADMIN MODELS PAGE
+# END: ADMIN MODELS PAGE v2
