@@ -642,23 +642,34 @@ def auth_odoo():
 # ---------------------------------------------------------------
 # ROUTES: MODEL LIBRARY (preview is public, full file is locked)
 # ---------------------------------------------------------------
+# START: LIBRARY LIST (sends viewer link, white picture, thumbnail style, search words)
 @app.get("/library")
 def library():
+    from admin_models import ensure_model_columns
     with cursor() as cur:
-        cur.execute("select id,title,preview_url,price_credits,category from models order by id desc")
+        ensure_model_columns(cur)
+        cur.execute("select id,title,preview_url,price_credits,category,viewer_url,white_url,thumb_mode,tags,slug from models order by id desc")
         rows = cur.fetchall()
-    return jsonify([{"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4]} for r in rows])
+    return jsonify([{"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4],
+                     "viewer": r[5] or r[2], "white": r[6] or "", "mode": r[7] or "",
+                     "tags": r[8] or "", "slug": r[9]} for r in rows])
+# END: LIBRARY LIST
 
 
+# START: LIBRARY ONE MODEL (sends viewer link, white picture, thumbnail style)
 @app.get("/library/<int:mid>")
 def library_one(mid):
+    from admin_models import ensure_model_columns
     with cursor() as cur:
-        cur.execute("select id,title,preview_url,price_credits,category,description from models where id=%s", (mid,))
+        ensure_model_columns(cur)
+        cur.execute("select id,title,preview_url,price_credits,category,description,viewer_url,white_url,thumb_mode,tags from models where id=%s", (mid,))
         r = cur.fetchone()
     if not r:
         return jsonify({"error": "Model not found."}), 404
-    return jsonify({"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4], "description": r[5]})
-
+    return jsonify({"id": r[0], "title": r[1], "preview": r[2], "price": r[3], "category": r[4],
+                    "description": r[5], "viewer": r[6] or r[2], "white": r[7] or "",
+                    "mode": r[8] or "", "tags": r[9] or ""})
+# END: LIBRARY ONE MODEL
 
 @app.post("/library/<int:mid>/download")
 @login_required
